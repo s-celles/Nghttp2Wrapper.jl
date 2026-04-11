@@ -8,20 +8,21 @@
     end
     port = Sockets.getsockname(server.listener)[2]
 
-    # Wait until server is accepting
-    for _ in 1:50
-        try
-            t = Sockets.connect("localhost", port)
-            close(t)
-            break
-        catch
-            sleep(0.2)
-        end
-    end
-
-    # Connect multiple clients
+    # Connect multiple clients (with retry on each connect)
     for i in 1:3
-        tcp = Sockets.connect("localhost", port)
+        local tcp = let
+            result = nothing
+            for _ in 1:50
+                try
+                    result = Sockets.connect("localhost", port)
+                    break
+                catch
+                    sleep(0.2)
+                end
+            end
+            result
+        end
+        tcp === nothing && error("Could not connect to server")
         cb = Callbacks()
         rv, session_ptr = nghttp2_session_client_new(cb.ptr)
         nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,

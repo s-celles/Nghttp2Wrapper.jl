@@ -1,3 +1,14 @@
+function _connect_retry(host, port; attempts=50, delay=0.2)
+    for _ in 1:attempts
+        try
+            return Sockets.connect(host, port)
+        catch
+            sleep(delay)
+        end
+    end
+    error("Could not connect to $host:$port after $attempts attempts")
+end
+
 @testitem "server lifecycle" begin
     using Nghttp2Wrapper
     server = HTTP2Server(0) do req
@@ -34,21 +45,20 @@ end
     end
     port = Sockets.getsockname(server.listener)[2]
 
-    # Wait until server is accepting
-    connected = false
-    for _ in 1:50
-        try
-            t = Sockets.connect("localhost", port)
-            close(t)
-            connected = true
-            break
-        catch
-            sleep(0.2)
+    tcp = let
+        result = nothing
+        for _ in 1:50
+            try
+                result = Sockets.connect("localhost", port)
+                break
+            catch
+                sleep(0.2)
+            end
         end
+        result
     end
-    @test connected
+    @test tcp !== nothing
 
-    tcp = Sockets.connect("localhost", port)
     cb = Callbacks()
     rv, session_ptr = nghttp2_session_client_new(cb.ptr)
     nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,
@@ -90,20 +100,20 @@ end
     end
     port = Sockets.getsockname(server.listener)[2]
 
-    connected = false
-    for _ in 1:50
-        try
-            t = Sockets.connect("localhost", port)
-            close(t)
-            connected = true
-            break
-        catch
-            sleep(0.2)
+    tcp = let
+        result = nothing
+        for _ in 1:50
+            try
+                result = Sockets.connect("localhost", port)
+                break
+            catch
+                sleep(0.2)
+            end
         end
+        result
     end
-    @test connected
+    @test tcp !== nothing
 
-    tcp = Sockets.connect("localhost", port)
     cb = Callbacks()
     rv, session_ptr = nghttp2_session_client_new(cb.ptr)
     nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,
