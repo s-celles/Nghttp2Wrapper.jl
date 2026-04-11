@@ -32,10 +32,19 @@ end
         ServerResponse(200, "Response!")
     end
     port = Sockets.getsockname(server.listener)[2]
-    sleep(0.2)
+    sleep(1)
 
-    # Connect as h2c client directly
-    tcp = Sockets.connect("localhost", port)
+    # Connect as h2c client directly with retry
+    tcp = nothing
+    for _ in 1:5
+        try
+            tcp = Sockets.connect("localhost", port)
+            break
+        catch
+            sleep(0.5)
+        end
+    end
+    tcp === nothing && error("Could not connect to server")
     cb = Callbacks()
     rv, session_ptr = nghttp2_session_client_new(cb.ptr)
     nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,
