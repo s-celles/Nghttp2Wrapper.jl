@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Low-Level API · Nghttp2Wrapper.jl</title><meta name="title" content="Low-Level API · Nghttp2Wrapper.jl"/><meta property="og:title" content="Low-Level API · Nghttp2Wrapper.jl"/><meta property="twitter:title" content="Low-Level API · Nghttp2Wrapper.jl"/><meta name="description" content="Documentation for Nghttp2Wrapper.jl."/><meta property="og:description" content="Documentation for Nghttp2Wrapper.jl."/><meta property="twitter:description" content="Documentation for Nghttp2Wrapper.jl."/><script data-outdated-warner src="../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL=".."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../assets/documenter.js"></script><script src="../search_index.js"></script><script src="../siteinfo.js"></script><script src="../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="../">Nghttp2Wrapper.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../">Home</a></li><li><a class="tocitem" href="../client/">Client Guide</a></li><li><a class="tocitem" href="../server/">Server Guide</a></li><li class="is-active"><a class="tocitem" href>Low-Level API</a><ul class="internal"><li><a class="tocitem" href="#Version-Information"><span>Version Information</span></a></li><li><a class="tocitem" href="#Error-Handling"><span>Error Handling</span></a></li><li><a class="tocitem" href="#Wrapper-Types-(Milestone-2)"><span>Wrapper Types (Milestone 2)</span></a></li><li><a class="tocitem" href="#HPACK-Compression"><span>HPACK Compression</span></a></li><li><a class="tocitem" href="#Header-Validation"><span>Header Validation</span></a></li><li><a class="tocitem" href="#Custom-Transport"><span>Custom Transport</span></a></li><li><a class="tocitem" href="#Raw-ccall-Bindings-(Milestone-1)"><span>Raw ccall Bindings (Milestone 1)</span></a></li></ul></li><li><a class="tocitem" href="../api/">API Reference</a></li><li><a class="tocitem" href="../advanced/">Advanced Features</a></li><li><a class="tocitem" href="../benchmarks/">Benchmarks</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li class="is-active"><a href>Low-Level API</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Low-Level API</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/s-celles/Nghttp2Wrapper.jl" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/s-celles/Nghttp2Wrapper.jl/blob/main/docs/src/lowlevel.md" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="Low-Level-API-Guide"><a class="docs-heading-anchor" href="#Low-Level-API-Guide">Low-Level API Guide</a><a id="Low-Level-API-Guide-1"></a><a class="docs-heading-anchor-permalink" href="#Low-Level-API-Guide" title="Permalink"></a></h1><p>Nghttp2Wrapper.jl exposes the complete nghttp2 C API for advanced use cases.</p><h2 id="Version-Information"><a class="docs-heading-anchor" href="#Version-Information">Version Information</a><a id="Version-Information-1"></a><a class="docs-heading-anchor-permalink" href="#Version-Information" title="Permalink"></a></h2><pre><code class="language-julia hljs">using Nghttp2Wrapper
+
+info_ptr = nghttp2_version()
+info = unsafe_load(info_ptr)
+println(&quot;nghttp2 version: &quot;, unsafe_string(info.version_str))</code></pre><h2 id="Error-Handling"><a class="docs-heading-anchor" href="#Error-Handling">Error Handling</a><a id="Error-Handling-1"></a><a class="docs-heading-anchor-permalink" href="#Error-Handling" title="Permalink"></a></h2><pre><code class="language-julia hljs"># Convert error codes to strings
+msg = nghttp2_strerror(NGHTTP2_ERR_INVALID_ARGUMENT)
+
+# Check if an error is fatal
+nghttp2_is_fatal(NGHTTP2_ERR_NOMEM)  # true
+nghttp2_is_fatal(NGHTTP2_ERR_WOULDBLOCK)  # false</code></pre><h2 id="Wrapper-Types-(Milestone-2)"><a class="docs-heading-anchor" href="#Wrapper-Types-(Milestone-2)">Wrapper Types (Milestone 2)</a><a id="Wrapper-Types-(Milestone-2)-1"></a><a class="docs-heading-anchor-permalink" href="#Wrapper-Types-(Milestone-2)" title="Permalink"></a></h2><p>Safe wrapper types with automatic resource cleanup:</p><pre><code class="language-julia hljs"># Session with automatic cleanup
+cb = Callbacks()
+session = Session(cb)
+submit_settings!(session)
+data = send!(session)
+close(session)  # explicit close, or let GC handle it</code></pre><h2 id="HPACK-Compression"><a class="docs-heading-anchor" href="#HPACK-Compression">HPACK Compression</a><a id="HPACK-Compression-1"></a><a class="docs-heading-anchor-permalink" href="#HPACK-Compression" title="Permalink"></a></h2><p>Compress and decompress HTTP headers:</p><pre><code class="language-julia hljs"># Compress
+deflater = HpackDeflater()
+headers = [NVPair(&quot;:method&quot;, &quot;GET&quot;), NVPair(&quot;:path&quot;, &quot;/&quot;)]
+compressed = deflate(deflater, headers)
+
+# Decompress
+inflater = HpackInflater()
+recovered = inflate(inflater, compressed)
+# recovered == [NVPair(&quot;:method&quot;, &quot;GET&quot;), NVPair(&quot;:path&quot;, &quot;/&quot;)]
+
+close(deflater)
+close(inflater)</code></pre><h2 id="Header-Validation"><a class="docs-heading-anchor" href="#Header-Validation">Header Validation</a><a id="Header-Validation-1"></a><a class="docs-heading-anchor-permalink" href="#Header-Validation" title="Permalink"></a></h2><pre><code class="language-julia hljs">nghttp2_check_header_name(&quot;content-type&quot;)   # true
+nghttp2_check_header_name(&quot;Content-Type&quot;)   # false (uppercase not allowed in HTTP/2)
+nghttp2_check_header_value(&quot;text/html&quot;)     # true
+nghttp2_check_authority(&quot;example.com:443&quot;)  # true
+nghttp2_check_path(&quot;/index.html&quot;)           # true
+nghttp2_check_method(&quot;GET&quot;)                 # true</code></pre><h2 id="Custom-Transport"><a class="docs-heading-anchor" href="#Custom-Transport">Custom Transport</a><a id="Custom-Transport-1"></a><a class="docs-heading-anchor-permalink" href="#Custom-Transport" title="Permalink"></a></h2><p>The Session API works with any IO stream, not just TLS connections. Use <code>send!</code> and <code>recv!</code> to exchange bytes with your transport:</p><pre><code class="language-julia hljs">using Nghttp2Wrapper, Sockets
+
+# Create a session
+cb = Callbacks()
+session = Session(cb)
+
+# Submit settings
+submit_settings!(session)
+
+# Get serialized bytes to send over your transport
+outgoing_bytes = send!(session)
+# write(your_transport, outgoing_bytes)
+
+# Feed incoming bytes from your transport
+# incoming = read(your_transport, ...)
+# recv!(session, incoming)
+
+close(session)</code></pre><p>This enables use with custom transports, proxies, or testing frameworks.</p><h2 id="Raw-ccall-Bindings-(Milestone-1)"><a class="docs-heading-anchor" href="#Raw-ccall-Bindings-(Milestone-1)">Raw ccall Bindings (Milestone 1)</a><a id="Raw-ccall-Bindings-(Milestone-1)-1"></a><a class="docs-heading-anchor-permalink" href="#Raw-ccall-Bindings-(Milestone-1)" title="Permalink"></a></h2><p>For maximum control, use the raw ccall functions directly:</p><pre><code class="language-julia hljs"># Create callbacks
+rv, callbacks_ptr = nghttp2_session_callbacks_new()
+
+# Create session
+rv, session_ptr = nghttp2_session_client_new(callbacks_ptr)
+
+# Submit settings
+nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,
+                        Ptr{Nghttp2SettingsEntry}(C_NULL), 0)
+
+# Send data
+nbytes, data_ptr = nghttp2_session_mem_send2(session_ptr)
+
+# Clean up
+nghttp2_session_del(session_ptr)
+nghttp2_session_callbacks_del(callbacks_ptr)</code></pre></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../server/">« Server Guide</a><a class="docs-footer-nextpage" href="../api/">API Reference »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.17.0 on <span class="colophon-date" title="Saturday 11 April 2026 21:19">Saturday 11 April 2026</span>. Using Julia version 1.12.6.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
