@@ -40,19 +40,19 @@
         close(tcp)
     end
 
-    sleep(1)
-
-    # Client side with retry
-    tcp_client = nothing
-    for _ in 1:5
+    # Wait until server is accepting
+    for _ in 1:50
         try
-            tcp_client = Sockets.connect("localhost", port)
+            t = Sockets.connect("localhost", port)
+            close(t)
             break
         catch
-            sleep(0.5)
+            sleep(0.2)
         end
     end
-    tcp_client === nothing && error("Could not connect to server")
+
+    # Client side
+    tcp_client = Sockets.connect("localhost", port)
     cb = Callbacks()
     rv, session_ptr = nghttp2_session_client_new(cb.ptr)
     nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,

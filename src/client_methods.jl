@@ -166,7 +166,7 @@ end
 """
     delete(client, path; headers=NVPair[]) → Response
 """
-function Base.delete(client::HTTP2Client, path::AbstractString; headers::Vector{NVPair}=NVPair[])
+function delete(client::HTTP2Client, path::AbstractString; headers::Vector{NVPair}=NVPair[])
     request(client, "DELETE", path; headers=headers)
 end
 

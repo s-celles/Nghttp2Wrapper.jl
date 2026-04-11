@@ -21,6 +21,7 @@ end
 
 @testitem "server handler dispatch" begin
     using Nghttp2Wrapper, Sockets
+
     handler_called = Ref(false)
     handler_method = Ref("")
     handler_path = Ref("")
@@ -32,19 +33,22 @@ end
         ServerResponse(200, "Response!")
     end
     port = Sockets.getsockname(server.listener)[2]
-    sleep(1)
 
-    # Connect as h2c client directly with retry
-    tcp = nothing
-    for _ in 1:5
+    # Wait until server is accepting
+    connected = false
+    for _ in 1:50
         try
-            tcp = Sockets.connect("localhost", port)
+            t = Sockets.connect("localhost", port)
+            close(t)
+            connected = true
             break
         catch
-            sleep(0.5)
+            sleep(0.2)
         end
     end
-    tcp === nothing && error("Could not connect to server")
+    @test connected
+
+    tcp = Sockets.connect("localhost", port)
     cb = Callbacks()
     rv, session_ptr = nghttp2_session_client_new(cb.ptr)
     nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,
@@ -59,8 +63,7 @@ end
     out = Nghttp2Wrapper._session_send_all(session_ptr)
     write(tcp, out)
 
-    # Wait for handler to be called
-    for _ in 1:20
+    for _ in 1:30
         yield()
         sleep(0.1)
         handler_called[] && break
@@ -78,6 +81,7 @@ end
 
 @testitem "handler exception returns 500" begin
     using Nghttp2Wrapper, Sockets
+
     handler_called = Ref(false)
 
     server = HTTP2Server(0) do req
@@ -85,7 +89,19 @@ end
         error("Intentional test error")
     end
     port = Sockets.getsockname(server.listener)[2]
-    sleep(0.2)
+
+    connected = false
+    for _ in 1:50
+        try
+            t = Sockets.connect("localhost", port)
+            close(t)
+            connected = true
+            break
+        catch
+            sleep(0.2)
+        end
+    end
+    @test connected
 
     tcp = Sockets.connect("localhost", port)
     cb = Callbacks()
@@ -108,7 +124,6 @@ end
         handler_called[] && break
     end
     @test handler_called[]
-    # Server didn't crash even though handler threw
 
     nghttp2_session_del(session_ptr)
     close(cb)
@@ -121,7 +136,7 @@ end
     server = HTTP2Server(0) do req
         ServerResponse(200, "OK")
     end
-    sleep(0.1)
+    sleep(0.5)
     shutdown!(server)
     @test !isopen(server)
 end
