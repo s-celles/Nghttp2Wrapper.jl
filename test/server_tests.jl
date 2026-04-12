@@ -1,14 +1,3 @@
-function _connect_retry(host, port; attempts=50, delay=0.2)
-    for _ in 1:attempts
-        try
-            return Sockets.connect(host, port)
-        catch
-            sleep(delay)
-        end
-    end
-    error("Could not connect to $host:$port after $attempts attempts")
-end
-
 @testitem "server lifecycle" begin
     using Nghttp2Wrapper
     server = HTTP2Server(0) do req
