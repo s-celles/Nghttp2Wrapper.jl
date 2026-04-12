@@ -36,6 +36,7 @@
         end
         out = Nghttp2Wrapper._session_send_all(session_ptr)
         write(tcp, out)
+        sleep(0.5)  # let server read request before closing connection
         nghttp2_session_del(session_ptr)
         close(cb)
         close(tcp)
