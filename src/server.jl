@@ -119,14 +119,14 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
         io,
         ReentrantLock()
     )
-    ctx_ref = Ref(ctx)
 
     cb = Callbacks()
     nghttp2_session_callbacks_set_on_header_callback(cb.ptr, _server_on_header_cb_ptr())
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cb.ptr, _server_on_data_chunk_cb_ptr())
     nghttp2_session_callbacks_set_on_frame_recv_callback(cb.ptr, _server_on_frame_recv_cb_ptr())
 
-    rv, session_ptr = nghttp2_session_server_new(cb.ptr, pointer_from_objref(ctx_ref))
+    # Pass ctx directly — mutable structs are heap-allocated and stable
+    rv, session_ptr = nghttp2_session_server_new(cb.ptr, pointer_from_objref(ctx))
     if rv != 0
         close(cb)
         try; close(io); catch; end
@@ -143,59 +143,58 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
     end
 
     # I/O loop — read raw TCP data and feed to nghttp2
-    buf = Vector{UInt8}(undef, 65536)
-    try
-        while server.isopen && isopen(io)
-            # Read at least 1 byte (blocking), then read whatever else is available
-            nbytes = try
-                # Read at least 1 byte to avoid busy-waiting
-                buf[1] = read(io, UInt8)
-                avail = bytesavailable(io)
-                if avail > 0
-                    extra = min(avail, length(buf) - 1)
-                    unsafe_read(io, pointer(buf, 2), UInt(extra))
-                    1 + Int(extra)
-                else
-                    1
+    # GC.@preserve ensures ctx stays alive while C code holds a pointer to it
+    GC.@preserve ctx begin
+        buf = Vector{UInt8}(undef, 65536)
+        try
+            while server.isopen && isopen(io)
+                nbytes = try
+                    buf[1] = read(io, UInt8)
+                    avail = bytesavailable(io)
+                    if avail > 0
+                        extra = min(avail, length(buf) - 1)
+                        unsafe_read(io, pointer(buf, 2), UInt(extra))
+                        1 + Int(extra)
+                    else
+                        1
+                    end
+                catch
+                    0
                 end
-            catch
-                0
-            end
 
-            if nbytes == 0
-                break
-            end
-
-            try
-                nghttp2_session_mem_recv2(session_ptr, buf[1:nbytes])
-            catch
-                break
-            end
-
-            # Send pending data
-            try
-                outdata = _session_send_all(session_ptr)
-                if !isempty(outdata)
-                    write(io, outdata)
+                if nbytes == 0
+                    break
                 end
-            catch
-                break
+
+                try
+                    nghttp2_session_mem_recv2(session_ptr, buf[1:nbytes])
+                catch
+                    break
+                end
+
+                try
+                    outdata = _session_send_all(session_ptr)
+                    if !isempty(outdata)
+                        write(io, outdata)
+                    end
+                catch
+                    break
+                end
             end
+        catch
         end
-    catch
-    end
 
-    # Cleanup
-    nghttp2_session_del(session_ptr)
-    close(cb)
-    try; close(io); catch; end
+        # Cleanup (inside GC.@preserve so ctx is alive during session_del)
+        nghttp2_session_del(session_ptr)
+        close(cb)
+        try; close(io); catch; end
+    end
 end
 
 # --- Server C callbacks ---
 
 function _server_get_ctx(user_data::Ptr{Cvoid})::ServerContext
-    ref = unsafe_pointer_to_objref(Ptr{Ref{ServerContext}}(user_data))
-    return ref[]
+    return unsafe_pointer_to_objref(user_data)::ServerContext
 end
 
 function _server_on_header_cb(session_ptr::Ptr{Cvoid}, frame_ptr::Ptr{Cvoid},

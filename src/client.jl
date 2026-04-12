@@ -42,7 +42,6 @@ mutable struct HTTP2Client
     host::String
     port::Int
     ctx::ClientContext
-    ctx_ref::Ref{ClientContext}
     io_task::Task
     isopen::Bool
 
@@ -64,7 +63,6 @@ mutable struct HTTP2Client
 
         # Create context for callbacks
         ctx = ClientContext(Dict{Int32,StreamState}(), ReentrantLock())
-        ctx_ref = Ref(ctx)
 
         # Create callbacks with C function pointers
         cb = Callbacks()
@@ -73,7 +71,8 @@ mutable struct HTTP2Client
         nghttp2_session_callbacks_set_on_stream_close_callback(cb.ptr, _on_stream_close_cb_ptr())
 
         # Create raw session with user_data pointing to context
-        rv, session_ptr = nghttp2_session_client_new(cb.ptr, pointer_from_objref(ctx_ref))
+        # ctx is a mutable struct so it's heap-allocated and stable
+        rv, session_ptr = nghttp2_session_client_new(cb.ptr, pointer_from_objref(ctx))
         check_error(rv)
 
         # Submit settings
@@ -99,7 +98,7 @@ mutable struct HTTP2Client
         write(tls, outdata)
 
         client = new(session_ptr, cb, tls, tcp, String(host), Int(port),
-                     ctx, ctx_ref, Task(() -> nothing), true)
+                     ctx, Task(() -> nothing), true)
 
         # Start I/O loop
         client.io_task = @async _io_loop(client)
@@ -156,8 +155,7 @@ end
 # --- C callback functions (no closures — use user_data to access context) ---
 
 function _get_ctx(user_data::Ptr{Cvoid})::ClientContext
-    ref = unsafe_pointer_to_objref(Ptr{Ref{ClientContext}}(user_data))
-    return ref[]
+    return unsafe_pointer_to_objref(user_data)::ClientContext
 end
 
 function _on_header_cb(session_ptr::Ptr{Cvoid}, frame_ptr::Ptr{Cvoid},
