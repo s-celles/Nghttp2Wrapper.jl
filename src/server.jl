@@ -49,6 +49,8 @@ mutable struct HTTP2Server
         listener = Sockets.listen(Sockets.InetAddr(host, port))
         server = new(listener, handler, Task[], true, Task(() -> nothing))
         server.accept_task = Threads.@spawn _server_accept_loop(server)
+        # Give the accept loop a chance to start before returning
+        yield()
         return server
     end
 end

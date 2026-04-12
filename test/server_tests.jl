@@ -49,7 +49,7 @@ end
         result = nothing
         for _ in 1:50
             try
-                result = Sockets.connect("localhost", port)
+                result = Sockets.connect("127.0.0.1", port)
                 break
             catch
                 sleep(0.2)
@@ -104,7 +104,7 @@ end
         result = nothing
         for _ in 1:50
             try
-                result = Sockets.connect("localhost", port)
+                result = Sockets.connect("127.0.0.1", port)
                 break
             catch
                 sleep(0.2)
