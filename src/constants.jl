@@ -50,6 +50,13 @@ const NGHTTP2_NV_FLAG_NO_INDEX = UInt8(1)
 const NGHTTP2_NV_FLAG_NO_COPY_NAME = UInt8(2)
 const NGHTTP2_NV_FLAG_NO_COPY_VALUE = UInt8(4)
 
+# Data source flags (used by nghttp2_data_source_read_callback to
+# signal end-of-data and related transitions back to nghttp2).
+const NGHTTP2_DATA_FLAG_NONE = UInt32(0)
+const NGHTTP2_DATA_FLAG_EOF = UInt32(0x01)
+const NGHTTP2_DATA_FLAG_NO_END_STREAM = UInt32(0x02)
+const NGHTTP2_DATA_FLAG_NO_COPY = UInt32(0x04)
+
 # Settings IDs
 const NGHTTP2_SETTINGS_HEADER_TABLE_SIZE = Int32(0x01)
 const NGHTTP2_SETTINGS_ENABLE_PUSH = Int32(0x02)

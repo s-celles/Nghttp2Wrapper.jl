@@ -78,6 +78,115 @@ end
     close(server)
 end
 
+@testitem "server response body round-trip" begin
+    using Nghttp2Wrapper, Sockets
+
+    # Regression test: a handler returning ServerResponse(200, "body")
+    # MUST send the body bytes over the wire. Prior to the [fix] this
+    # server.jl test item covers, `nghttp2_submit_response2` was called
+    # with a C_NULL data provider, which caused nghttp2 to send HEADERS
+    # with END_STREAM set and NO DATA frames. Clients therefore saw
+    # an empty body on every response.
+    #
+    # This test reproduces the bug by driving a raw nghttp2 client
+    # session against a local HTTP2Server and asserting that the
+    # response body collected on the client side matches the string
+    # the handler returned.
+    response_body = "Hello from the handler!"
+
+    server = HTTP2Server(0) do req
+        ServerResponse(200, response_body)
+    end
+    port = Sockets.getsockname(server.listener)[2]
+
+    tcp = let
+        result = nothing
+        for _ in 1:50
+            try
+                result = Sockets.connect("127.0.0.1", port)
+                break
+            catch
+                sleep(0.05)
+            end
+        end
+        result
+    end
+    @test tcp !== nothing
+
+    # Reuse Nghttp2Wrapper's own client-side ClientContext + callbacks so
+    # response HEADERS / DATA frames are collected into `st.body` and
+    # `st.headers` automatically.
+    ctx = Nghttp2Wrapper.ClientContext(
+        Dict{Int32,Nghttp2Wrapper.StreamState}(), ReentrantLock())
+    lock(ctx.lock) do
+        ctx.streams[Int32(1)] = Nghttp2Wrapper.StreamState(Int32(1))
+    end
+
+    cb = Callbacks()
+    nghttp2_session_callbacks_set_on_header_callback(
+        cb.ptr, Nghttp2Wrapper._on_header_cb_ptr())
+    nghttp2_session_callbacks_set_on_data_chunk_recv_callback(
+        cb.ptr, Nghttp2Wrapper._on_data_chunk_cb_ptr())
+
+    GC.@preserve ctx begin
+        rv, session_ptr = nghttp2_session_client_new(cb.ptr, pointer_from_objref(ctx))
+        @test rv == 0
+        try
+            # Submit initial SETTINGS + the GET request.
+            nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,
+                                    Ptr{Nghttp2SettingsEntry}(C_NULL), 0)
+            headers = [NVPair(":method", "GET"), NVPair(":path", "/"),
+                       NVPair(":scheme", "http"),
+                       NVPair(":authority", "127.0.0.1:$port")]
+            nva = [to_nghttp2_nv(nv) for nv in headers]
+            GC.@preserve headers nva begin
+                nghttp2_submit_request2(session_ptr, C_NULL,
+                                        pointer(nva), length(nva), C_NULL, C_NULL)
+            end
+            out = Nghttp2Wrapper._session_send_all(session_ptr)
+            write(tcp, out)
+
+            # Pump server responses through the client session until the
+            # response body is fully collected (or a timeout fires).
+            deadline = time() + 5.0
+            while time() < deadline
+                yield()
+                sleep(0.05)
+                buf = readavailable(tcp)
+                if !isempty(buf)
+                    nghttp2_session_mem_recv2(session_ptr, collect(buf))
+                    # The client session may produce WINDOW_UPDATE / SETTINGS
+                    # ACK frames in response — flush them back to the server.
+                    ack_out = Nghttp2Wrapper._session_send_all(session_ptr)
+                    if !isempty(ack_out)
+                        write(tcp, ack_out)
+                    end
+                end
+                collected = lock(ctx.lock) do
+                    haskey(ctx.streams, Int32(1)) ?
+                        copy(ctx.streams[Int32(1)].body) : UInt8[]
+                end
+                if length(collected) >= ncodeunits(response_body)
+                    break
+                end
+            end
+
+            # Assert body round-trip succeeded.
+            final_body = lock(ctx.lock) do
+                haskey(ctx.streams, Int32(1)) ?
+                    copy(ctx.streams[Int32(1)].body) : UInt8[]
+            end
+            @test String(final_body) == response_body
+        finally
+            nghttp2_session_del(session_ptr)
+        end
+    end
+
+    close(cb)
+    close(tcp)
+    close(server)
+end
+
 @testitem "handler exception returns 500" begin
     using Nghttp2Wrapper, Sockets
 

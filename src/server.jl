@@ -12,6 +12,27 @@ end
 ServerStreamState(id::Int32) = ServerStreamState(id, "", "", NVPair[], UInt8[])
 
 """
+Response body source passed to nghttp2 via `nghttp2_data_provider`.
+
+`data` holds the full response body bytes; `offset` is the next
+byte to read. The data source read callback copies up to `len`
+bytes into nghttp2's buffer on each invocation, advances `offset`,
+and signals `NGHTTP2_DATA_FLAG_EOF` when `offset` reaches
+`length(data)`.
+
+The struct is kept alive across the C boundary by storing it in
+the owning `ServerContext`'s `response_bodies` dict (so GC does
+not reclaim it while nghttp2 still holds a pointer). The dict
+entry is removed when the callback signals EOF.
+"""
+mutable struct ResponseBodySource
+    data::Vector{UInt8}
+    offset::Int
+end
+
+ResponseBodySource(body::Vector{UInt8}) = ResponseBodySource(body, 0)
+
+"""
 Internal context for server-side nghttp2 callbacks.
 """
 mutable struct ServerContext
@@ -20,6 +41,13 @@ mutable struct ServerContext
     session_ptr::Ptr{Cvoid}
     io_stream::IO
     lock::ReentrantLock
+    # Pinned response body sources keyed by stream ID. Entries are
+    # created in `_server_on_frame_recv_cb` before calling
+    # `nghttp2_submit_response2` with a data provider, and removed in
+    # `_server_data_source_read_cb` once EOF is reached. This dict is
+    # the GC root that keeps `ResponseBodySource` alive while nghttp2
+    # holds a pointer to it via `nghttp2_data_source.ptr`.
+    response_bodies::Dict{Int32,ResponseBodySource}
 end
 
 """
@@ -180,7 +208,8 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
         server.handler,
         C_NULL,
         io,
-        ReentrantLock()
+        ReentrantLock(),
+        Dict{Int32,ResponseBodySource}(),
     )
 
     cb = Callbacks()
@@ -398,11 +427,31 @@ function _server_on_frame_recv_cb(session_ptr::Ptr{Cvoid}, frame_ptr::Ptr{Cvoid}
                 resp_headers = NVPair[NVPair(":status", string(resp.status))]
                 append!(resp_headers, resp.headers)
 
-                # Submit response
+                # Submit response. If the handler returned a non-empty
+                # body, build an nghttp2_data_provider that streams the
+                # body via the C callback defined below. The
+                # ResponseBodySource is pinned in ctx.response_bodies so
+                # it survives GC while nghttp2 holds a pointer to it.
                 nva = [to_nghttp2_nv(nv) for nv in resp_headers]
-                GC.@preserve resp_headers nva begin
-                    nghttp2_submit_response2(ctx.session_ptr, stream_id,
-                                              pointer(nva), length(nva), C_NULL)
+                if isempty(resp.body)
+                    GC.@preserve resp_headers nva begin
+                        nghttp2_submit_response2(ctx.session_ptr, stream_id,
+                                                  pointer(nva), length(nva), C_NULL)
+                    end
+                else
+                    body_source = ResponseBodySource(resp.body)
+                    lock(ctx.lock) do
+                        ctx.response_bodies[stream_id] = body_source
+                    end
+                    data_prd = Ref(Nghttp2DataProvider(
+                        pointer_from_objref(body_source),
+                        _server_data_source_read_cb_ptr(),
+                    ))
+                    GC.@preserve resp_headers nva body_source data_prd begin
+                        nghttp2_submit_response2(ctx.session_ptr, stream_id,
+                                                  pointer(nva), length(nva),
+                                                  Base.unsafe_convert(Ptr{Cvoid}, data_prd))
+                    end
                 end
             end
         end
@@ -417,3 +466,96 @@ _server_on_data_chunk_cb_ptr() = @cfunction(_server_on_data_chunk_cb, Cint,
     (Ptr{Cvoid}, UInt8, Int32, Ptr{UInt8}, Csize_t, Ptr{Cvoid}))
 _server_on_frame_recv_cb_ptr() = @cfunction(_server_on_frame_recv_cb, Cint,
     (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}))
+
+"""
+Layout-compatible representation of nghttp2's `nghttp2_data_provider`:
+
+```c
+typedef union {
+    int fd;
+    void *ptr;
+} nghttp2_data_source;
+
+typedef struct {
+    nghttp2_data_source source;
+    nghttp2_data_source_read_callback read_callback;
+} nghttp2_data_provider;
+```
+
+We only use the `ptr` variant of the union, so a single
+`Ptr{Cvoid}` for `source` matches the 8-byte union width on
+64-bit platforms.
+"""
+struct Nghttp2DataProvider
+    source::Ptr{Cvoid}
+    read_callback::Ptr{Cvoid}
+end
+
+"""
+nghttp2 data source read callback.
+
+Copies up to `len` bytes from the `ResponseBodySource` (whose
+Julia pointer is carried in the `source` union) into the output
+buffer that nghttp2 provides. Advances the source's offset, and
+sets `NGHTTP2_DATA_FLAG_EOF` in `data_flags` once the whole body
+has been consumed.
+
+Matches the C signature:
+
+```c
+ssize_t (*nghttp2_data_source_read_callback)(
+    nghttp2_session *session, int32_t stream_id, uint8_t *buf,
+    size_t length, uint32_t *data_flags, nghttp2_data_source *source,
+    void *user_data);
+```
+"""
+function _server_data_source_read_cb(session_ptr::Ptr{Cvoid}, stream_id::Int32,
+                                      buf::Ptr{UInt8}, len::Csize_t,
+                                      data_flags::Ptr{UInt32},
+                                      source::Ptr{Cvoid},
+                                      user_data::Ptr{Cvoid})::Cssize_t
+    try
+        # `source` points at an `nghttp2_data_source` union. We stored
+        # the Julia pointer in the `ptr` field, so dereference one
+        # pointer level to read our `ResponseBodySource` back.
+        src_ptr = unsafe_load(Ptr{Ptr{Cvoid}}(source))
+        body_source = unsafe_pointer_to_objref(src_ptr)::ResponseBodySource
+
+        remaining = length(body_source.data) - body_source.offset
+        to_copy = min(Int(len), remaining)
+        if to_copy > 0
+            GC.@preserve body_source unsafe_copyto!(
+                buf, pointer(body_source.data, body_source.offset + 1), to_copy)
+            body_source.offset += to_copy
+        end
+
+        if body_source.offset >= length(body_source.data)
+            # Signal end-of-data so nghttp2 flushes END_STREAM on this
+            # response. We must OR with the existing flags because
+            # nghttp2 may have set NGHTTP2_DATA_FLAG_NO_COPY or similar.
+            unsafe_store!(data_flags,
+                          unsafe_load(data_flags) | NGHTTP2_DATA_FLAG_EOF)
+
+            # Release the pinned body source so the dict doesn't leak
+            # across many responses on the same connection. The ctx
+            # pointer is in user_data (set via nghttp2_session_server_new).
+            try
+                ctx = _server_get_ctx(user_data)
+                lock(ctx.lock) do
+                    delete!(ctx.response_bodies, stream_id)
+                end
+            catch
+                # If ctx retrieval fails we still return the data we
+                # already copied; the leak is bounded by the connection
+                # lifetime.
+            end
+        end
+
+        return Cssize_t(to_copy)
+    catch
+        return Cssize_t(NGHTTP2_ERR_CALLBACK_FAILURE)
+    end
+end
+
+_server_data_source_read_cb_ptr() = @cfunction(_server_data_source_read_cb, Cssize_t,
+    (Ptr{Cvoid}, Int32, Ptr{UInt8}, Csize_t, Ptr{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}))
