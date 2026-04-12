@@ -139,3 +139,39 @@ end
     shutdown!(server)
     @test !isopen(server)
 end
+
+@testitem "TLS server handshake" begin
+    using Nghttp2Wrapper, Sockets
+    certfile = joinpath(@__DIR__, "fixtures", "server.crt")
+    keyfile = joinpath(@__DIR__, "fixtures", "server.key")
+
+    handler_called = Ref(false)
+    server = HTTP2Server(0; certfile=certfile, keyfile=keyfile) do req
+        handler_called[] = true
+        ServerResponse(200, "Hello TLS!")
+    end
+    port = Sockets.getsockname(server.listener)[2]
+
+    try
+        # Retry connect because accept loop may take a moment to start
+        client = nothing
+        for _ in 1:20
+            try
+                client = HTTP2Client("127.0.0.1"; port=port, verify_peer=false)
+                break
+            catch
+                sleep(0.2)
+            end
+        end
+        @test client !== nothing
+
+        if client !== nothing
+            resp = get(client, "/")
+            @test resp.status == 200
+            @test handler_called[]
+            close(client)
+        end
+    finally
+        close(server)
+    end
+end

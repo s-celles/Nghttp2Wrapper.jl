@@ -48,7 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - High-level HTTP/2 server API (Milestone 4):
   - `HTTP2Server` type with request handler callback interface
   - `ServerRequest` and `ServerResponse` types for server-side request/response
-  - Cleartext HTTP/2 (h2c) support — TLS server deferred pending OpenSSL.jl upstream fix
+  - Cleartext HTTP/2 (h2c) support
+  - TLS server support with ALPN `h2` (via custom non-blocking accept loop working around OpenSSL.jl upstream bug)
   - Concurrent connection handling via task-per-connection model
   - Handler exception safety: errors → 500 response without server crash
   - Graceful shutdown via `shutdown!()`

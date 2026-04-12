@@ -114,14 +114,13 @@ This document outlines the development roadmap for Nghttp2Wrapper.jl, a Julia wr
 
 **Goal:** Provide a user-friendly HTTP/2 server interface.
 
-- [x] `HTTP2Server` type managing listening socket and sessions (h2c cleartext)
+- [x] `HTTP2Server` type managing listening socket and sessions (h2c + TLS)
 - [x] Request handler callback interface
 - [ ] Server push support (`PUSH_PROMISE`) — placeholder only, full implementation deferred
 - [x] Flow control management (automatic via nghttp2 defaults)
 - [x] Concurrent stream handling (task-per-connection)
 - [x] Graceful shutdown
-
-**Deferred:** TLS server support blocked by [OpenSSL.jl upstream bug](upstream-bugs.md) — server-side `accept()` doesn't handle non-blocking BIO handshake loop. Server currently uses cleartext HTTP/2 (h2c). TLS will be added when OpenSSL.jl is fixed or via MbedTLS.jl fallback.
+- [x] TLS server support with ALPN `h2` (custom non-blocking accept loop working around [OpenSSL.jl upstream bug](upstream-bugs.md))
 
 ---
 

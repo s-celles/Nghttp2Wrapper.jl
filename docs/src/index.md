@@ -37,7 +37,6 @@ close(client)
 
 ## Known Limitations
 
-- **TLS server**: Server-side TLS is deferred due to an [OpenSSL.jl upstream issue](https://github.com/s-celles/Nghttp2Wrapper.jl/blob/main/upstream-bugs.md). The server currently uses cleartext HTTP/2 (h2c).
 - **Request body streaming**: Sending large request bodies incrementally is not yet supported. Complete request bodies are sent at once.
 - **HTTP.jl integration**: Integration as an HTTP/2 layer for HTTP.jl is planned for a future release.
 

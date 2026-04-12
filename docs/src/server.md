@@ -94,8 +94,28 @@ Or immediate close:
 close(server)
 ```
 
-## Known Limitation: TLS
+## TLS Server
 
-The server currently operates in cleartext HTTP/2 (h2c) mode. TLS server support is deferred due to an [OpenSSL.jl upstream issue](https://github.com/s-celles/Nghttp2Wrapper.jl/blob/main/upstream-bugs.md) with server-side TLS accept handling.
+Pass `certfile` and `keyfile` to enable TLS with ALPN `h2`:
 
-For testing, connect using the low-level session API over a plain TCP socket.
+```julia
+server = HTTP2Server(8443;
+    certfile="cert.pem",
+    keyfile="key.pem") do req
+    ServerResponse(200, "Hello HTTPS/2!")
+end
+```
+
+For testing with self-signed certificates, use `verify_peer=false` on the client:
+
+```julia
+client = HTTP2Client("localhost"; port=8443, verify_peer=false)
+resp = get(client, "/")
+close(client)
+```
+
+!!! note "Implementation detail"
+    Server-side TLS accept is implemented with a custom non-blocking
+    handshake loop running on a separate OS thread. This works around an
+    [OpenSSL.jl upstream issue](https://github.com/s-celles/Nghttp2Wrapper.jl/blob/main/upstream-bugs.md)
+    where `Sockets.accept(ssl)` doesn't handle `SSL_ERROR_WANT_READ`.

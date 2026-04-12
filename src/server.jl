@@ -23,31 +23,56 @@ mutable struct ServerContext
 end
 
 """
-    HTTP2Server(handler, port; host="0.0.0.0")
+    HTTP2Server(handler, port; host="0.0.0.0", certfile="", keyfile="")
 
 Create an HTTP/2 server listening on the given port.
-Uses cleartext HTTP/2 (h2c) — clients must use HTTP/2 prior knowledge.
+If `certfile` and `keyfile` are provided, the server uses TLS with ALPN `h2`.
+Otherwise it uses cleartext HTTP/2 (h2c).
+
 The handler function receives a `ServerRequest` and returns a `ServerResponse`.
 
 # Examples
+
+Cleartext (h2c):
 ```julia
 server = HTTP2Server(8080) do req
     ServerResponse(200, "Hello HTTP/2!")
 end
-close(server)
+```
+
+TLS (h2):
+```julia
+server = HTTP2Server(8443; certfile="cert.pem", keyfile="key.pem") do req
+    ServerResponse(200, "Hello HTTPS/2!")
+end
 ```
 """
 mutable struct HTTP2Server
     listener::Sockets.TCPServer
     handler::Function
+    ssl_ctx::Any  # OpenSSL.SSLContext or nothing
     connections::Vector{Task}
     isopen::Bool
     accept_task::Task
 
     function HTTP2Server(handler::Function, port::Integer;
-                         host::AbstractString="0.0.0.0")
+                         host::AbstractString="0.0.0.0",
+                         certfile::AbstractString="",
+                         keyfile::AbstractString="")
         listener = Sockets.listen(Sockets.InetAddr(host, port))
-        server = new(listener, handler, Task[], true, Task(() -> nothing))
+
+        ssl_ctx = nothing
+        if !isempty(certfile) && !isempty(keyfile)
+            ctx = OpenSSL.SSLContext(OpenSSL.TLSServerMethod())
+            cert_pem = read(certfile, String)
+            key_pem = read(keyfile, String)
+            OpenSSL.ssl_use_certificate(ctx, OpenSSL.X509Certificate(cert_pem))
+            OpenSSL.ssl_use_private_key(ctx, OpenSSL.EvpPKey(key_pem))
+            OpenSSL.ssl_set_alpn(ctx, OpenSSL.UPDATE_HTTP2_ALPN)
+            ssl_ctx = ctx
+        end
+
+        server = new(listener, handler, ssl_ctx, Task[], true, Task(() -> nothing))
         server.accept_task = Threads.@spawn _server_accept_loop(server)
         return server
     end
@@ -89,6 +114,32 @@ function shutdown!(server::HTTP2Server)
     end
 end
 
+"""
+Server-side TLS accept with non-blocking BIO handshake loop.
+OpenSSL.jl's `Sockets.accept(ssl)` only calls SSL_accept once and
+doesn't handle SSL_ERROR_WANT_READ. We re-implement it here with
+a proper retry loop, waiting on eof(tcp) for more data.
+"""
+function _ssl_server_accept(tls_stream, tcp)
+    while true
+        ret = ccall((:SSL_accept, OpenSSL.libssl), Cint, (OpenSSL.SSL,), tls_stream.ssl)
+        if ret == 1
+            ccall((:SSL_set_read_ahead, OpenSSL.libssl), Cvoid,
+                  (OpenSSL.SSL, Cint), tls_stream.ssl, Cint(1))
+            return
+        end
+        err = ccall((:SSL_get_error, OpenSSL.libssl), Cint,
+                    (OpenSSL.SSL, Cint), tls_stream.ssl, ret)
+        if err == 2  # SSL_ERROR_WANT_READ
+            eof(tcp) && throw(EOFError())
+        elseif err == 3  # SSL_ERROR_WANT_WRITE
+            yield()
+        else
+            throw(OpenSSL.OpenSSLError("SSL_accept failed (error code $err)"))
+        end
+    end
+end
+
 function _server_accept_loop(server::HTTP2Server)
     try
         while server.isopen
@@ -98,8 +149,22 @@ function _server_accept_loop(server::HTTP2Server)
                 break
             end
 
-            # Spawn connection handler (h2c — cleartext HTTP/2)
-            t = Threads.@spawn _server_connection_handler(server, tcp)
+            # If TLS is configured, perform the handshake
+            io = if server.ssl_ctx !== nothing
+                try
+                    tls = OpenSSL.SSLStream(server.ssl_ctx, tcp)
+                    _ssl_server_accept(tls, tcp)
+                    tls
+                catch
+                    try; close(tcp); catch; end
+                    continue
+                end
+            else
+                tcp
+            end
+
+            # Spawn connection handler
+            t = Threads.@spawn _server_connection_handler(server, io)
             push!(server.connections, t)
 
             # Clean up completed connections
@@ -140,24 +205,24 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
         try; write(io, outdata); catch; end
     end
 
-    # I/O loop — read raw TCP data and feed to nghttp2
-    # GC.@preserve ensures ctx stays alive while C code holds a pointer to it
+    # I/O loop — read data from client and feed to nghttp2.
+    # SSLStream doesn't support single-byte read, so we use unsafe_read for
+    # exact-length reads (like the client does). For plain TCP we use the
+    # byte-read pattern to avoid busy waiting.
+    # GC.@preserve ensures ctx stays alive while C code holds a pointer to it.
+    is_tls = !(io isa Sockets.TCPSocket)
     GC.@preserve ctx begin
         buf = Vector{UInt8}(undef, 65536)
         try
             while server.isopen && isopen(io)
-                nbytes = try
-                    buf[1] = read(io, UInt8)
-                    avail = bytesavailable(io)
-                    if avail > 0
-                        extra = min(avail, length(buf) - 1)
-                        unsafe_read(io, pointer(buf, 2), UInt(extra))
-                        1 + Int(extra)
-                    else
-                        1
-                    end
-                catch
-                    0
+                nbytes = if is_tls
+                    # Read HTTP/2 frame: 9-byte header + variable payload.
+                    # nghttp2 handles the client connection preface (24-byte
+                    # magic) + SETTINGS frame as a single initial chunk, so
+                    # we need to read the preface bytes first then frames.
+                    _read_tls_chunk!(io, buf)
+                else
+                    _read_tcp_chunk!(io, buf)
                 end
 
                 if nbytes == 0
@@ -186,6 +251,62 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
         nghttp2_session_del(session_ptr)
         close(cb)
         try; close(io); catch; end
+    end
+end
+
+"""
+Read one chunk from a plain TCP socket: at least one byte, then drain
+whatever else is immediately available.
+"""
+function _read_tcp_chunk!(io, buf::Vector{UInt8})
+    try
+        buf[1] = read(io, UInt8)
+        avail = bytesavailable(io)
+        if avail > 0
+            extra = min(avail, length(buf) - 1)
+            unsafe_read(io, pointer(buf, 2), UInt(extra))
+            return 1 + Int(extra)
+        end
+        return 1
+    catch
+        return 0
+    end
+end
+
+"""
+Read one chunk from an SSLStream: either the initial client connection preface
+(24 bytes) and a following frame, or a single HTTP/2 frame (9-byte header +
+variable payload).
+"""
+const HTTP2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+const HTTP2_PREFACE_LEN = length(HTTP2_PREFACE)
+
+function _read_tls_chunk!(io, buf::Vector{UInt8})
+    # First call: peek at 3 bytes. If they match "PRI", this is the connection
+    # preface — read it in full first, then read one frame.
+    try
+        # Read 9 bytes (enough to hold either 9 bytes of preface or a frame header)
+        unsafe_read(io, pointer(buf), UInt(9))
+
+        # Is this the start of the preface?
+        if buf[1] == UInt8('P') && buf[2] == UInt8('R') && buf[3] == UInt8('I')
+            # Read the rest of the preface (24 - 9 = 15 more bytes)
+            unsafe_read(io, pointer(buf, 10), UInt(HTTP2_PREFACE_LEN - 9))
+            return HTTP2_PREFACE_LEN
+        end
+
+        # It's a frame header — parse length and read payload
+        frame_len = (UInt32(buf[1]) << 16) | (UInt32(buf[2]) << 8) | UInt32(buf[3])
+        total_len = Int(9 + frame_len)
+        if frame_len > 0
+            if total_len > length(buf)
+                resize!(buf, total_len)
+            end
+            unsafe_read(io, pointer(buf, 10), UInt(frame_len))
+        end
+        return total_len
+    catch
+        return 0
     end
 end
 

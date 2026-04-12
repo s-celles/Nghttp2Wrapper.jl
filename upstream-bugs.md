@@ -1,11 +1,19 @@
 # Upstream Issues
 
-## OpenSSL.jl — Server-side TLS accept doesn't work with non-blocking BIO
+## OpenSSL.jl — Server-side TLS accept doesn't handle non-blocking BIO
 
 **Package**: [OpenSSL.jl](https://github.com/JuliaWeb/OpenSSL.jl) v1.6.1
 **Discovered**: 2026-04-11
-**Status**: Open
-**Impact**: Blocks HTTP/2 server TLS support in Nghttp2Wrapper.jl (Milestone 4)
+**Status**: Open (worked around in Nghttp2Wrapper.jl)
+**Impact**: Was blocking HTTP/2 server TLS support (Milestone 4)
+
+**Resolution in Nghttp2Wrapper.jl**: We implemented a custom
+`_ssl_server_accept` function (in `src/server.jl`) that wraps
+`SSL_accept` in a retry loop handling `SSL_ERROR_WANT_READ` by waiting
+on `eof(tcp)` of the underlying raw TCP socket. Combined with running
+the accept loop on a separate OS thread via `Threads.@spawn`, this
+avoids the deadlock that occurs when trying to do TLS handshake in the
+main task's cooperative scheduler.
 
 ### Description
 
