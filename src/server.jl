@@ -48,7 +48,7 @@ mutable struct HTTP2Server
                          host::AbstractString="0.0.0.0")
         listener = Sockets.listen(Sockets.InetAddr(host, port))
         server = new(listener, handler, Task[], true, Task(() -> nothing))
-        server.accept_task = @async _server_accept_loop(server)
+        server.accept_task = Threads.@spawn _server_accept_loop(server)
         return server
     end
 end
@@ -99,7 +99,7 @@ function _server_accept_loop(server::HTTP2Server)
             end
 
             # Spawn connection handler (h2c — cleartext HTTP/2)
-            t = @async _server_connection_handler(server, tcp)
+            t = Threads.@spawn _server_connection_handler(server, tcp)
             push!(server.connections, t)
 
             # Clean up completed connections

@@ -36,14 +36,15 @@
         end
         out = Nghttp2Wrapper._session_send_all(session_ptr)
         write(tcp, out)
+        sleep(0.5)  # let server process before closing
         nghttp2_session_del(session_ptr)
         close(cb)
         close(tcp)
     end
 
-    for _ in 1:30
+    for _ in 1:50
         yield()
-        sleep(0.1)
+        sleep(0.2)
         call_count[] >= 3 && break
     end
 
