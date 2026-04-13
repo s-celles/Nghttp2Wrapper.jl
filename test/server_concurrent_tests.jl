@@ -6,7 +6,7 @@
         call_count[] += 1
         ServerResponse(200, "Response $(call_count[])")
     end
-    port = Sockets.getsockname(server.listener)[2]
+    port = Nghttp2Wrapper.listener_port(server)
 
     # Connect multiple clients (with retry on each connect)
     for i in 1:3

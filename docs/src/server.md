@@ -115,7 +115,6 @@ close(client)
 ```
 
 !!! note "Implementation detail"
-    Server-side TLS accept is implemented with a custom non-blocking
-    handshake loop running on a separate OS thread. This works around an
-    [OpenSSL.jl upstream issue](https://github.com/s-celles/Nghttp2Wrapper.jl/blob/main/upstream-bugs.md)
-    where `Sockets.accept(ssl)` doesn't handle `SSL_ERROR_WANT_READ`.
+    Server-side TLS is provided by [Reseau.jl](https://github.com/JuliaServices/Reseau.jl),
+    whose `TLS.listen` / `TLS.accept` drive the handshake to completion
+    internally. ALPN `h2` is advertised via `TLS.Config(alpn_protocols = ["h2"])`.

@@ -32,7 +32,7 @@ end
         handler_path[] = req.path
         ServerResponse(200, "Response!")
     end
-    port = Sockets.getsockname(server.listener)[2]
+    port = Nghttp2Wrapper.listener_port(server)
 
     tcp = let
         result = nothing
@@ -97,7 +97,7 @@ end
     server = HTTP2Server(0) do req
         ServerResponse(200, response_body)
     end
-    port = Sockets.getsockname(server.listener)[2]
+    port = Nghttp2Wrapper.listener_port(server)
 
     tcp = let
         result = nothing
@@ -196,7 +196,7 @@ end
         handler_called[] = true
         error("Intentional test error")
     end
-    port = Sockets.getsockname(server.listener)[2]
+    port = Nghttp2Wrapper.listener_port(server)
 
     tcp = let
         result = nothing
@@ -259,7 +259,7 @@ end
         handler_called[] = true
         ServerResponse(200, "Hello TLS!")
     end
-    port = Sockets.getsockname(server.listener)[2]
+    port = Nghttp2Wrapper.listener_port(server)
 
     try
         # Retry connect because accept loop may take a moment to start

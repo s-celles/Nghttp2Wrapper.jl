@@ -38,7 +38,6 @@ mutable struct HTTP2Client
     session_ptr::Ptr{Cvoid}
     callbacks::Callbacks
     tls_stream::Any
-    tcp_socket::Sockets.TCPSocket
     host::String
     port::Int
     ctx::ClientContext
@@ -50,16 +49,21 @@ mutable struct HTTP2Client
                          initial_window_size::Integer=65535,
                          header_table_size::Integer=4096,
                          verify_peer::Bool=true)
-        # TCP connect
-        tcp = Sockets.connect(host, port)
+        # TLS connect (Reseau dials TCP, performs the handshake, and negotiates ALPN in one call)
+        tls = TLS.connect("tcp", "$(host):$(port)";
+                          server_name = String(host),
+                          verify_peer = verify_peer,
+                          alpn_protocols = ["h2"])
 
-        # TLS setup with ALPN
-        ssl_ctx = OpenSSL.SSLContext(OpenSSL.TLSClientMethod())
-        OpenSSL.ssl_set_options(ssl_ctx, OpenSSL.SSL_OP_NO_SSLv3)
-        OpenSSL.ssl_set_alpn(ssl_ctx, OpenSSL.UPDATE_HTTP2_ALPN)
-        tls = OpenSSL.SSLStream(ssl_ctx, tcp)
-        OpenSSL.hostname!(tls, host)
-        OpenSSL.connect(tls; require_ssl_verification=verify_peer)
+        state = TLS.connection_state(tls)
+        if !state.handshake_complete
+            try; close(tls); catch; end
+            throw(ErrorException("TLS handshake did not complete"))
+        end
+        if state.alpn_protocol !== "h2"
+            try; close(tls); catch; end
+            throw(ErrorException("Peer did not negotiate h2 via ALPN (got: $(state.alpn_protocol))"))
+        end
 
         # Create context for callbacks
         ctx = ClientContext(Dict{Int32,StreamState}(), ReentrantLock())
@@ -97,7 +101,7 @@ mutable struct HTTP2Client
         outdata = _session_send_all(session_ptr)
         write(tls, outdata)
 
-        client = new(session_ptr, cb, tls, tcp, String(host), Int(port),
+        client = new(session_ptr, cb, tls, String(host), Int(port),
                      ctx, Task(() -> nothing), true)
 
         # Start I/O loop
@@ -111,7 +115,6 @@ mutable struct HTTP2Client
                     obj.session_ptr = C_NULL
                 end
                 try; close(obj.tls_stream); catch; end
-                try; close(obj.tcp_socket); catch; end
             end
         end
 
@@ -140,7 +143,6 @@ function Base.close(client::HTTP2Client)
             client.session_ptr = C_NULL
         end
         try; close(client.tls_stream); catch; end
-        try; close(client.tcp_socket); catch; end
     end
     return nothing
 end
@@ -237,7 +239,7 @@ _on_stream_close_cb_ptr() = @cfunction(_on_stream_close_cb, Cint,
 function _io_loop(client::HTTP2Client)
     buf = Vector{UInt8}(undef, 65536)
     try
-        while client.isopen && isopen(client.tcp_socket)
+        while client.isopen && isopen(client.tls_stream)
             # Read frame header (9 bytes)
             try
                 unsafe_read(client.tls_stream, pointer(buf), UInt(9))

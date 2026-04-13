@@ -76,9 +76,9 @@ end
 ```
 """
 mutable struct HTTP2Server
-    listener::Sockets.TCPServer
+    listener::Any  # Sockets.TCPServer (h2c) or Reseau.TLS.Listener (h2)
     handler::Function
-    ssl_ctx::Any  # OpenSSL.SSLContext or nothing
+    tls_config::Any  # Reseau.TLS.Config or nothing
     connections::Vector{Task}
     isopen::Bool
     accept_task::Task
@@ -87,20 +87,19 @@ mutable struct HTTP2Server
                          host::AbstractString="0.0.0.0",
                          certfile::AbstractString="",
                          keyfile::AbstractString="")
-        listener = Sockets.listen(Sockets.InetAddr(host, port))
-
-        ssl_ctx = nothing
-        if !isempty(certfile) && !isempty(keyfile)
-            ctx = OpenSSL.SSLContext(OpenSSL.TLSServerMethod())
-            cert_pem = read(certfile, String)
-            key_pem = read(keyfile, String)
-            OpenSSL.ssl_use_certificate(ctx, OpenSSL.X509Certificate(cert_pem))
-            OpenSSL.ssl_use_private_key(ctx, OpenSSL.EvpPKey(key_pem))
-            OpenSSL.ssl_set_alpn(ctx, OpenSSL.UPDATE_HTTP2_ALPN)
-            ssl_ctx = ctx
+        tls_config = nothing
+        listener = if !isempty(certfile) && !isempty(keyfile)
+            tls_config = TLS.Config(
+                cert_file = certfile,
+                key_file = keyfile,
+                alpn_protocols = ["h2"],
+            )
+            TLS.listen("tcp", "$(host):$(port)", tls_config)
+        else
+            Sockets.listen(Sockets.InetAddr(host, port))
         end
 
-        server = new(listener, handler, ssl_ctx, Task[], true, Task(() -> nothing))
+        server = new(listener, handler, tls_config, Task[], true, Task(() -> nothing))
         server.accept_task = Threads.@spawn _server_accept_loop(server)
         return server
     end
@@ -122,6 +121,21 @@ end
 
 Base.isopen(server::HTTP2Server) = server.isopen
 
+"""
+    listener_port(server::HTTP2Server) -> Int
+
+Return the TCP port the server's listening socket is bound to. Works for
+both plaintext (h2c) and TLS (h2) listeners.
+"""
+function listener_port(server::HTTP2Server)
+    l = server.listener
+    if l isa TLS.Listener
+        return Int(TLS.addr(l).port)
+    else
+        return Int(Sockets.getsockname(l)[2])
+    end
+end
+
 function Base.show(io::IO, server::HTTP2Server)
     state = server.isopen ? "listening" : "closed"
     n = length(server.connections)
@@ -142,53 +156,17 @@ function shutdown!(server::HTTP2Server)
     end
 end
 
-"""
-Server-side TLS accept with non-blocking BIO handshake loop.
-OpenSSL.jl's `Sockets.accept(ssl)` only calls SSL_accept once and
-doesn't handle SSL_ERROR_WANT_READ. We re-implement it here with
-a proper retry loop, waiting on eof(tcp) for more data.
-"""
-function _ssl_server_accept(tls_stream, tcp)
-    while true
-        ret = ccall((:SSL_accept, OpenSSL.libssl), Cint, (OpenSSL.SSL,), tls_stream.ssl)
-        if ret == 1
-            ccall((:SSL_set_read_ahead, OpenSSL.libssl), Cvoid,
-                  (OpenSSL.SSL, Cint), tls_stream.ssl, Cint(1))
-            return
-        end
-        err = ccall((:SSL_get_error, OpenSSL.libssl), Cint,
-                    (OpenSSL.SSL, Cint), tls_stream.ssl, ret)
-        if err == 2  # SSL_ERROR_WANT_READ
-            eof(tcp) && throw(EOFError())
-        elseif err == 3  # SSL_ERROR_WANT_WRITE
-            yield()
-        else
-            throw(OpenSSL.OpenSSLError("SSL_accept failed (error code $err)"))
-        end
-    end
-end
-
 function _server_accept_loop(server::HTTP2Server)
     try
         while server.isopen
-            tcp = try
-                accept(server.listener)
+            io = try
+                if server.tls_config !== nothing
+                    TLS.accept(server.listener)
+                else
+                    accept(server.listener)
+                end
             catch
                 break
-            end
-
-            # If TLS is configured, perform the handshake
-            io = if server.ssl_ctx !== nothing
-                try
-                    tls = OpenSSL.SSLStream(server.ssl_ctx, tcp)
-                    _ssl_server_accept(tls, tcp)
-                    tls
-                catch
-                    try; close(tcp); catch; end
-                    continue
-                end
-            else
-                tcp
             end
 
             # Spawn connection handler
@@ -235,11 +213,11 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
     end
 
     # I/O loop — read data from client and feed to nghttp2.
-    # SSLStream doesn't support single-byte read, so we use unsafe_read for
-    # exact-length reads (like the client does). For plain TCP we use the
+    # Reseau's TLS.Conn doesn't support single-byte read, so we use unsafe_read
+    # for exact-length reads (like the client does). For plain TCP we use the
     # byte-read pattern to avoid busy waiting.
     # GC.@preserve ensures ctx stays alive while C code holds a pointer to it.
-    is_tls = !(io isa Sockets.TCPSocket)
+    is_tls = io isa TLS.Conn
     GC.@preserve ctx begin
         buf = Vector{UInt8}(undef, 65536)
         try
@@ -303,7 +281,7 @@ function _read_tcp_chunk!(io, buf::Vector{UInt8})
 end
 
 """
-Read one chunk from an SSLStream: either the initial client connection preface
+Read one chunk from a TLS connection: either the initial client connection preface
 (24 bytes) and a following frame, or a single HTTP/2 frame (9-byte header +
 variable payload).
 """

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-13
+
+### Changed
+
+- **TLS backend migrated from OpenSSL.jl to [Reseau.jl](https://github.com/JuliaServices/Reseau.jl).** Both `HTTP2Client` and `HTTP2Server` now use Reseau's `TLS.connect` / `TLS.listen` / `TLS.accept`. The public API (`HTTP2Client`, `HTTP2Server`, their constructors, keyword arguments, and request/response types) is unchanged.
+- Internal `HTTP2Server.ssl_ctx` field renamed to `tls_config` (now holds a `Reseau.TLS.Config`).
+- `HTTP2Client` now verifies `alpn_protocol == "h2"` via `Reseau.TLS.connection_state` and raises a clear error if the peer did not negotiate `h2`.
+
+### Added
+
+- Internal helper `Nghttp2Wrapper.listener_port(server)` that returns the bound port for both plaintext and TLS listeners.
+
+### Removed
+
+- `OpenSSL` runtime dependency.
+- Bespoke `_ssl_server_accept` handshake-retry workaround in `src/server.jl` (the ccalls into `SSL_accept` and `SSL_get_error` are gone — Reseau's `TLS.accept` drives the handshake to completion internally).
+- Internal `HTTP2Client.tcp_socket` field (the TLS connection now owns the underlying TCP socket).
+
+### Fixed
+
+- Server-side TLS accept no longer carries a workaround for the upstream OpenSSL.jl `SSL_accept` single-shot bug. See `upstream-bugs.md` for historical context.
+
+## [0.1.0]
+
 ### Added
 
 - Initial project bootstrap: package structure, module, tests, documentation, CI
