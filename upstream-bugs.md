@@ -4,7 +4,7 @@
 
 **Package**: [OpenSSL.jl](https://github.com/JuliaWeb/OpenSSL.jl) v1.6.1
 **Discovered**: 2026-04-11
-**Status**: Open (worked around in Nghttp2Wrapper.jl)
+**Status**: **Resolved for Nghttp2Wrapper.jl 2026-04-13 by feature 008-reseau-tls-migration** — the package no longer depends on OpenSSL.jl. Server-side TLS accept is now handled by [Reseau.jl](https://github.com/JuliaServices/Reseau.jl)'s `TLS.accept`, which drives the handshake to completion internally. The OpenSSL.jl upstream bug may still exist for other downstream consumers; this entry is retained for historical context.
 **Impact**: Was blocking HTTP/2 server TLS support (Milestone 4)
 
 **Resolution in Nghttp2Wrapper.jl**: We implemented a custom

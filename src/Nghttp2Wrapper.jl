@@ -1,7 +1,7 @@
 module Nghttp2Wrapper
 
 using nghttp2_jll
-using OpenSSL
+using Reseau: TLS
 using URIs
 using Sockets
 
