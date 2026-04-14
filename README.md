@@ -1,5 +1,6 @@
 # Nghttp2Wrapper.jl
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/s-celles/Nghttp2Wrapper.jl)
 [![CI](https://github.com/s-celles/Nghttp2Wrapper.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/s-celles/Nghttp2Wrapper.jl/actions/workflows/CI.yml)
 [![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://s-celles.github.io/Nghttp2Wrapper.jl/dev/)
 
