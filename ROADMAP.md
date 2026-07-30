@@ -261,6 +261,40 @@ tacked onto the end of the session that designed it.
 
 ## Platform Support
 
+### Julia version floor
+
+`julia = "1.12"` is not caution — it is forced by the C library, and the reason
+is worth recording because it is invisible from the Julia source.
+
+This wrapper uses nghttp2's `size_t` API throughout: `nghttp2_session_mem_recv2`,
+`nghttp2_session_mem_send2`, `nghttp2_submit_request2`,
+`nghttp2_submit_response2`, `nghttp2_hd_deflate_hd2`, `nghttp2_hd_inflate_hd2`
+and the `_callback2` setters. That family arrived in **nghttp2 1.57.0**.
+
+`nghttp2_jll` is a standard library, so its version is whatever the Julia
+sysimage ships:
+
+| Julia | nghttp2_jll |
+|-------|-------------|
+| 1.10 (LTS) | 1.52.0 — predates the `2` API |
+| 1.12 | 1.64.0 |
+
+Lowering the floor to the LTS therefore means porting every call to the legacy
+`ssize_t` entry points, which are deprecated upstream. It is not a compat-bound
+edit. This was measured, not assumed: setting `julia = "1.10"` produces
+`Unsatisfiable requirements detected for package nghttp2_jll … restricted to
+versions 1.64.0-1`.
+
+The practical consequence for downstream: gRPCServer.jl supports Julia 1.10, so
+its `Nghttp2Backend` is simply unavailable on the LTS. That is acceptable for an
+optional backend and disqualifying for a default one.
+
+Note also that `Sockets` must stay at `"1"`. It is a standard library, so
+pinning it to `"1.11"` imposes a *second*, independent Julia floor — one that
+would silently keep blocking the LTS even if the nghttp2 constraint were ever
+lifted.
+
+
 nghttp2_jll provides `libnghttp2` for the following platforms:
 
 | OS      | Architectures                                      |
