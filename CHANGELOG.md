@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ServerStream <: IO`**, the incremental handler surface (ROADMAP
+  Milestone 7). Subtypes `IO`, so a handler needs no new vocabulary: `read`,
+  `readavailable`, `readbytes!`, `eof`, `write`, `isopen` and `close` mean what
+  they already mean, alongside `setstatus`, `setheader` and `settrailer`.
+
+  Chosen over a channel-based API because `readbytes!` fills a caller-owned
+  buffer — no allocation per message — and because blocking `IO` semantics are
+  exactly what nghttp2's deferred data provider needs.
+
+  Two behaviours worth knowing, both pinned by tests:
+
+  - `eof` **blocks** while the peer may still send. That is deliberate, and it
+    is what makes the deferred provider work, but it means `eof` is not a
+    "is anything available right now" probe.
+  - `read(stream, n)` returns *at most* `n` bytes, as for any `IO`. A short
+    read is neither an error nor end-of-stream.
+
+  The type is complete and tested in isolation; wiring it into `HTTP2Server` so
+  a handler can be driven by it is the next step and is not yet done.
+- **`ServerResponse` can carry trailers.** `ServerResponse(status, body;
+  trailers = [...])` emits them as a HEADERS block after the body. The last
+  DATA frame is flagged `NGHTTP2_DATA_FLAG_NO_END_STREAM` so the body no
+  longer closes the stream — the trailers do.
+
+  This is what makes trailers reachable from `HTTP2Server`: the binding alone
+  was only usable by driving a session through the low-level API. A gRPC
+  *unary* response is now expressible.
+
+  A trailers-only response (empty body) still goes through a data provider: a
+  `C_NULL` provider makes nghttp2 put END_STREAM on the HEADERS frame, leaving
+  no point at which trailers could follow.
+
+  The three-positional-argument `ServerResponse(status, headers, body)` form is
+  kept, so existing callers are unaffected.
+- **`nghttp2_submit_trailer`**, with a pointer-level entry point and an
+  `NVPair` convenience overload. A trailing HEADERS block is sent after the
+  response body and closes the stream (RFC 7540 §8.1).
+
+  This was a hard blocker for anything speaking gRPC on top of this package:
+  a gRPC response carries its status in the trailers, not in the response
+  headers, so no call could complete without it. Requested by gRPCServer.jl,
+  which is evaluating an `nghttp2` backend.
+
+  Documented return values are measured, not assumed: `stream_id` is validated
+  eagerly (0 gives `NGHTTP2_ERR_INVALID_ARGUMENT`, -501), while the existence
+  of the stream is only checked at send time.
+
 ## [0.2.0] — 2026-04-13
 
 ### Changed

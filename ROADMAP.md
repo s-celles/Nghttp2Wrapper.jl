@@ -150,6 +150,115 @@ This document outlines the development roadmap for Nghttp2Wrapper.jl, a Julia wr
 
 ---
 
+## Milestone 7 — Incremental server handler (`ServerStream <: IO`)
+
+**Status**: Designed, not implemented.
+
+The buffered handler (`ServerRequest` → `ServerResponse`) delivers the whole
+request body before running and takes the whole response body at once. With
+trailers it is enough for a unary request/response exchange, but it cannot emit
+messages incrementally, so it cannot carry gRPC's three streaming call types.
+
+### Shape
+
+A second entry point passing the handler a stream instead of a request:
+
+```julia
+HTTP2Server(8080) do stream
+    while !eof(stream)
+        chunk = readavailable(stream)
+    end
+    setstatus(stream, 200)
+    setheader(stream, "content-type" => "application/grpc")
+    write(stream, payload)
+    settrailer(stream, "grpc-status" => "0")
+end
+```
+
+`ServerStream <: IO`, so it introduces no new vocabulary: `read`, `write`,
+`eof`, `readavailable`, `readbytes!`, `isopen`, `close` mean what they already
+mean. It mirrors `HTTP.Stream`, which gRPCServer.jl's `AbstractGRPCStream`
+contract is already written against — that adapter becomes close to mechanical.
+
+The buffered handler stays as the simple path. The two forms select on handler
+arity or an explicit keyword, over one implementation.
+
+### Why `IO` rather than channels
+
+- **No allocation per message.** `readbytes!(stream, buf, n)` fills a
+  caller-owned buffer; `Channel{Vector{UInt8}}` forces one allocation per
+  message, which is costly on a stream of small gRPC frames.
+- **Flow control maps directly.** Incremental writes require the data provider
+  to return `NGHTTP2_ERR_DEFERRED` when nothing is available and
+  `nghttp2_session_resume_data` once more arrives. That is the semantics of a
+  blocking `IO` — no adaptation layer.
+- **No task imposed per call.** The handler runs on the connection task.
+
+### Supported `Base` surface — and the trap
+
+Subtyping `IO` inherits a large implicit contract: generic `Base` methods
+assume primitives that will not all be implemented, and a partial
+implementation fails obscurely.
+
+Two consequences, both deliberate:
+
+- Document exactly which methods are supported, and make the rest fail with a
+  clear error rather than falling back to a generic path.
+- `Base.read(io, n)` reads *at most* `n` bytes. gRPCServer.jl hit this: a
+  single `read(io, len)` returned only what was buffered and capped every
+  request at the flow-control window. Any documentation of this type must say
+  so, and a `read_exactly`-style helper is worth providing.
+
+Planned surface: `eof`, `isopen`, `close`, `read(::ServerStream, ::Int)`,
+`readavailable`, `readbytes!`, `write`, `unsafe_write`, plus `setstatus`,
+`setheader`, `settrailer`.
+
+### Write path mechanics
+
+`write` appends to a buffer and calls `nghttp2_session_resume_data`. The data
+provider drains that buffer; when it is empty and the handler has not finished,
+it returns `NGHTTP2_ERR_DEFERRED` instead of EOF. On completion it sets
+`NGHTTP2_DATA_FLAG_EOF`, plus `NGHTTP2_DATA_FLAG_NO_END_STREAM` when trailers
+are pending — the mechanism already in place for buffered responses.
+
+### Status: the type is done, the wiring is not
+
+`ServerStream` and its `IO` surface are implemented and tested in isolation.
+Connecting it to `HTTP2Server` is the remaining work, and it is larger than it
+looks because of a constraint in the current connection loop.
+
+**The blocker.** `_server_connection_handler` is a blocking read:
+
+```julia
+while server.isopen && isopen(io)
+    nbytes = _read_tcp_chunk!(io, buf)          # blocks here
+    nghttp2_session_mem_recv2(session_ptr, buf[1:nbytes])
+    write(io, _session_send_all(session_ptr))
+end
+```
+
+Everything the server emits is emitted *in reaction to an inbound read*. In
+server-streaming the client sends its request and then goes quiet, so a handler
+producing messages has nothing to flush them to the socket: the stream stalls
+until the next inbound byte, which never comes. Wiring therefore also requires
+the loop to wake on "the handler wrote something".
+
+**Proposed shape** (not yet validated by implementation):
+
+- the handler runs in its own task, started when the headers arrive rather than
+  after the full body
+- a writer task waits on a condition held by the connection context; `write` on
+  the `ServerStream` signals it, and it calls `nghttp2_session_resume_data`
+  followed by `_session_send_all`
+- an nghttp2 session is **not thread-safe**, so both tasks must serialise every
+  call into it under a shared lock — including `mem_recv2` on the read side
+
+**Why it was stopped here.** This is a concurrency change inside a C binding,
+and it alters `HTTP2Server`'s execution model for every user, not just the
+streaming path. Done wrong it does not produce a failing test; it produces
+intermittent segfaults. It deserves a deliberate start rather than being
+tacked onto the end of the session that designed it.
+
 ## Platform Support
 
 nghttp2_jll provides `libnghttp2` for the following platforms:

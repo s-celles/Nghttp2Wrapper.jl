@@ -28,9 +28,15 @@ entry is removed when the callback signals EOF.
 mutable struct ResponseBodySource
     data::Vector{UInt8}
     offset::Int
+    # Trailers to emit once the body is exhausted. When non-empty the body must
+    # not carry END_STREAM — the trailing HEADERS block closes the stream
+    # instead (RFC 7540 §8.1).
+    trailers::Vector{NVPair}
 end
 
-ResponseBodySource(body::Vector{UInt8}) = ResponseBodySource(body, 0)
+ResponseBodySource(body::Vector{UInt8}) = ResponseBodySource(body, 0, NVPair[])
+ResponseBodySource(body::Vector{UInt8}, trailers::Vector{NVPair}) =
+    ResponseBodySource(body, 0, trailers)
 
 """
 Internal context for server-side nghttp2 callbacks.
@@ -411,13 +417,16 @@ function _server_on_frame_recv_cb(session_ptr::Ptr{Cvoid}, frame_ptr::Ptr{Cvoid}
                 # ResponseBodySource is pinned in ctx.response_bodies so
                 # it survives GC while nghttp2 holds a pointer to it.
                 nva = [to_nghttp2_nv(nv) for nv in resp_headers]
-                if isempty(resp.body)
+                # A trailers-only response still needs a data provider: with a
+                # C_NULL provider nghttp2 puts END_STREAM on the HEADERS frame
+                # and there is no longer any point at which trailers can follow.
+                if isempty(resp.body) && isempty(resp.trailers)
                     GC.@preserve resp_headers nva begin
                         nghttp2_submit_response2(ctx.session_ptr, stream_id,
                                                   pointer(nva), length(nva), C_NULL)
                     end
                 else
-                    body_source = ResponseBodySource(resp.body)
+                    body_source = ResponseBodySource(resp.body, resp.trailers)
                     lock(ctx.lock) do
                         ctx.response_bodies[stream_id] = body_source
                     end
@@ -508,11 +517,22 @@ function _server_data_source_read_cb(session_ptr::Ptr{Cvoid}, stream_id::Int32,
         end
 
         if body_source.offset >= length(body_source.data)
-            # Signal end-of-data so nghttp2 flushes END_STREAM on this
-            # response. We must OR with the existing flags because
+            # Signal end-of-data. We must OR with the existing flags because
             # nghttp2 may have set NGHTTP2_DATA_FLAG_NO_COPY or similar.
-            unsafe_store!(data_flags,
-                          unsafe_load(data_flags) | NGHTTP2_DATA_FLAG_EOF)
+            #
+            # With trailers pending, add NGHTTP2_DATA_FLAG_NO_END_STREAM so the
+            # last DATA frame does *not* close the stream, then submit the
+            # trailing HEADERS block, which does. Submitting from inside this
+            # callback is the pattern nghttp2 documents for trailers.
+            flags = unsafe_load(data_flags) | NGHTTP2_DATA_FLAG_EOF
+            if !isempty(body_source.trailers)
+                flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM
+            end
+            unsafe_store!(data_flags, flags)
+
+            if !isempty(body_source.trailers)
+                nghttp2_submit_trailer(session_ptr, stream_id, body_source.trailers)
+            end
 
             # Release the pinned body source so the dict doesn't leak
             # across many responses on the same connection. The ctx

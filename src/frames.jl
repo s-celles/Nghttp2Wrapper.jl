@@ -48,6 +48,29 @@ function nghttp2_submit_response2(session::Ptr{Cvoid}, stream_id::Integer,
 end
 
 """
+    nghttp2_submit_trailer(session, stream_id, nva, nvlen) → Cint
+
+Submit a trailing HEADERS block on `stream_id`, closing the stream.
+
+Trailers are how a gRPC response terminates: the status travels in a HEADERS
+frame sent *after* the body, not in the response headers (RFC 7540 §8.1, and
+the gRPC HTTP/2 protocol binding). A server that cannot emit them cannot
+complete a gRPC call.
+
+Call this after the response body has been submitted. nghttp2 sets END_STREAM
+on the frame itself, so no flag argument is taken.
+
+Returns 0 on success, or a negative nghttp2 error code — notably
+`NGHTTP2_ERR_INVALID_ARGUMENT` for an unknown or already-closed stream.
+"""
+function nghttp2_submit_trailer(session::Ptr{Cvoid}, stream_id::Integer,
+                                 nva::Ptr{Nghttp2Nv}, nvlen::Integer)
+    ccall((:nghttp2_submit_trailer, libnghttp2), Cint,
+          (Ptr{Cvoid}, Int32, Ptr{Nghttp2Nv}, Csize_t),
+          session, stream_id, nva, nvlen)
+end
+
+"""
     nghttp2_submit_headers(session, flags, stream_id, pri_spec, nva, nvlen, stream_user_data) → Int32
 
 Submit a HEADERS frame.

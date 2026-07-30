@@ -187,6 +187,92 @@ end
     close(server)
 end
 
+@testitem "server response trailers round-trip" begin
+    using Nghttp2Wrapper, Sockets
+
+    # A gRPC response carries its status in a trailing HEADERS block sent after
+    # the body, not in the response headers. That means the body must NOT close
+    # the stream: the data provider has to signal EOF together with
+    # NGHTTP2_DATA_FLAG_NO_END_STREAM, and the trailers close it instead.
+    #
+    # Asserts the trailer is received on the wire, after the body.
+    response_body = "payload"
+
+    server = HTTP2Server(0) do req
+        ServerResponse(200, response_body; trailers = [NVPair("grpc-status", "0")])
+    end
+    port = Nghttp2Wrapper.listener_port(server)
+
+    tcp = let
+        result = nothing
+        for _ in 1:50
+            try
+                result = Sockets.connect("127.0.0.1", port); break
+            catch; sleep(0.05) end
+        end
+        result
+    end
+    @test tcp !== nothing
+
+    ctx = Nghttp2Wrapper.ClientContext(
+        Dict{Int32,Nghttp2Wrapper.StreamState}(), ReentrantLock())
+    lock(ctx.lock) do
+        ctx.streams[Int32(1)] = Nghttp2Wrapper.StreamState(Int32(1))
+    end
+
+    cb = Callbacks()
+    nghttp2_session_callbacks_set_on_header_callback(
+        cb.ptr, Nghttp2Wrapper._on_header_cb_ptr())
+    nghttp2_session_callbacks_set_on_data_chunk_recv_callback(
+        cb.ptr, Nghttp2Wrapper._on_data_chunk_cb_ptr())
+
+    GC.@preserve ctx begin
+        rv, session_ptr = nghttp2_session_client_new(cb.ptr, pointer_from_objref(ctx))
+        @test rv == 0
+        try
+            nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,
+                                    Ptr{Nghttp2SettingsEntry}(C_NULL), 0)
+            headers = [NVPair(":method", "GET"), NVPair(":path", "/"),
+                       NVPair(":scheme", "http"),
+                       NVPair(":authority", "127.0.0.1:$port")]
+            nva = [to_nghttp2_nv(nv) for nv in headers]
+            GC.@preserve headers nva begin
+                nghttp2_submit_request2(session_ptr, C_NULL,
+                                        pointer(nva), length(nva), C_NULL, C_NULL)
+            end
+            write(tcp, Nghttp2Wrapper._session_send_all(session_ptr))
+
+            deadline = time() + 5.0
+            got_trailer = false
+            while time() < deadline
+                yield(); sleep(0.05)
+                buf = readavailable(tcp)
+                if !isempty(buf)
+                    nghttp2_session_mem_recv2(session_ptr, collect(buf))
+                    ack = Nghttp2Wrapper._session_send_all(session_ptr)
+                    isempty(ack) || write(tcp, ack)
+                end
+                got_trailer = lock(ctx.lock) do
+                    haskey(ctx.streams, Int32(1)) &&
+                        any(nv -> String(copy(nv.name)) == "grpc-status",
+                            ctx.streams[Int32(1)].headers)
+                end
+                got_trailer && break
+            end
+
+            @test got_trailer
+            body = lock(ctx.lock) do
+                copy(ctx.streams[Int32(1)].body)
+            end
+            @test String(body) == response_body
+        finally
+            nghttp2_session_del(session_ptr)
+        end
+    end
+
+    close(cb); close(tcp); close(server)
+end
+
 @testitem "handler exception returns 500" begin
     using Nghttp2Wrapper, Sockets
 

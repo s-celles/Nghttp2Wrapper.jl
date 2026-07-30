@@ -26,16 +26,35 @@ struct ServerResponse
     status::Int
     headers::Vector{NVPair}
     body::Vector{UInt8}
+    trailers::Vector{NVPair}
 end
 
-function ServerResponse(status::Integer; headers::Vector{NVPair}=NVPair[], body::Vector{UInt8}=UInt8[])
-    ServerResponse(Int(status), headers, body)
+"""
+    ServerResponse(status; headers, body, trailers)
+
+`trailers` are sent as a HEADERS block *after* the body, closing the stream
+(RFC 7540 §8.1). When it is non-empty the body no longer carries END_STREAM —
+the trailers do.
+
+This is what gRPC requires: the call status travels in the trailers, not in the
+response headers.
+"""
+function ServerResponse(status::Integer; headers::Vector{NVPair}=NVPair[],
+                        body::Vector{UInt8}=UInt8[],
+                        trailers::Vector{NVPair}=NVPair[])
+    ServerResponse(Int(status), headers, body, trailers)
 end
 
-function ServerResponse(status::Integer, body::AbstractString)
-    ServerResponse(Int(status), NVPair[], Vector{UInt8}(body))
+function ServerResponse(status::Integer, body::AbstractString;
+                        trailers::Vector{NVPair}=NVPair[])
+    ServerResponse(Int(status), NVPair[], Vector{UInt8}(body), trailers)
 end
+
+# Positional form kept for callers predating the trailers field.
+ServerResponse(status::Integer, headers::Vector{NVPair}, body::Vector{UInt8}) =
+    ServerResponse(Int(status), headers, body, NVPair[])
 
 function Base.show(io::IO, r::ServerResponse)
-    print(io, "ServerResponse($(r.status), $(length(r.headers)) headers, $(length(r.body)) bytes)")
+    print(io, "ServerResponse($(r.status), $(length(r.headers)) headers, $(length(r.body)) bytes",
+          isempty(r.trailers) ? "" : ", $(length(r.trailers)) trailers", ")")
 end

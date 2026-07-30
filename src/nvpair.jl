@@ -47,3 +47,19 @@ function with_nva(f, pairs::Vector{NVPair})
         return f(pointer(nva), length(nva))
     end
 end
+
+"""
+    nghttp2_submit_trailer(session, stream_id, pairs::Vector{NVPair}) → Cint
+
+Convenience overload of the pointer-level entry point in `frames.jl`, taking
+`NVPair`s. Defined here rather than beside it because `NVPair` and `with_nva`
+are introduced by this file, which is included later.
+
+The underlying name/value buffers are GC-preserved for the duration of the call.
+"""
+function nghttp2_submit_trailer(session::Ptr{Cvoid}, stream_id::Integer,
+                                 pairs::Vector{NVPair})
+    with_nva(pairs) do nva_ptr, nvlen
+        nghttp2_submit_trailer(session, stream_id, nva_ptr, nvlen)
+    end
+end
