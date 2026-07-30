@@ -1,0 +1,38 @@
+# Opens pull requests raising [compat] bounds as dependencies release new
+# versions.
+#
+# This package has real runtime dependencies — Reseau, URIs and nghttp2_jll —
+# and Reseau in particular moves fast, so a bound left at "1" quietly stops
+# meaning anything. Without this workflow nobody notices until a downstream
+# resolve picks a version the package was never tested against.
+#
+# `subdirs` covers the test environment too: test/Project.toml declares Aqua,
+# TestItemRunner and nghttp2_jll with no [compat] at all. docs/ and benchmark/
+# are deliberately left out — they exist to build a manual and run benchmarks
+# locally, and PRs bumping Documenter there would be noise.
+name: CompatHelper
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  CompatHelper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1'
+      - name: Install CompatHelper
+        run: julia -e 'using Pkg; Pkg.add("CompatHelper")'
+      - name: Run CompatHelper
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPATHELPER_PRIV: ${{ secrets.DOCUMENTER_KEY }}
+        run: julia -e 'using CompatHelper; CompatHelper.main(; subdirs = ["", "test"])'
