@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-30
+
+### Fixed
+
+- **`Sockets` compat relaxed from `"1.11"` to `"1"`.** Sockets is a standard
+  library, so that bound imposed a Julia floor of its own, unrelated to anything
+  this package needs — and it was the first constraint an attempt to support the
+  1.10 LTS hit, masking the real one behind it.
+
+  The real floor is unchanged and stays `julia = "1.12"`: this package calls
+  nghttp2's `size_t` API (`mem_recv2`, `mem_send2`, `submit_request2`,
+  `submit_response2`, `hd_*_hd2`, the `_callback2` setters), introduced in
+  nghttp2 1.57.0, and `nghttp2_jll` is itself a standard library — Julia 1.10
+  ships 1.52.0. ROADMAP.md now records this, since nothing in the Julia source
+  reveals it.
+
 ### Added
 
 - **`ServerStream <: IO`**, the incremental handler surface (ROADMAP

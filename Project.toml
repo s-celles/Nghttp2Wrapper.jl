@@ -1,6 +1,6 @@
 name = "Nghttp2Wrapper"
 uuid = "aac3f40a-7475-434e-9d89-bbdc1574c652"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Sébastien Celles <s.celles@gmail.com>"]
 
 [deps]
