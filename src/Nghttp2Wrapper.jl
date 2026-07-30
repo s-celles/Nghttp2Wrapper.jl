@@ -22,6 +22,7 @@ include("response.jl")
 include("client.jl")
 include("client_methods.jl")
 include("server_types.jl")
+include("server_stream.jl")
 include("server.jl")
 include("priority.jl")
 include("pool.jl")
@@ -138,7 +139,7 @@ export request, request_stream, shutdown!
 export post, put, patch, head, options
 
 # Milestone 4: HTTP/2 Server
-export HTTP2Server, ServerRequest, ServerResponse
+export HTTP2Server, ServerStream, setstatus, setheader, settrailer, ServerRequest, ServerResponse
 
 # Milestone 6: Advanced Features
 export PrioritySpec

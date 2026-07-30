@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ServerStream <: IO`**, the incremental handler surface (ROADMAP
+  Milestone 7). Subtypes `IO`, so a handler needs no new vocabulary: `read`,
+  `readavailable`, `readbytes!`, `eof`, `write`, `isopen` and `close` mean what
+  they already mean, alongside `setstatus`, `setheader` and `settrailer`.
+
+  Chosen over a channel-based API because `readbytes!` fills a caller-owned
+  buffer — no allocation per message — and because blocking `IO` semantics are
+  exactly what nghttp2's deferred data provider needs.
+
+  Two behaviours worth knowing, both pinned by tests:
+
+  - `eof` **blocks** while the peer may still send. That is deliberate, and it
+    is what makes the deferred provider work, but it means `eof` is not a
+    "is anything available right now" probe.
+  - `read(stream, n)` returns *at most* `n` bytes, as for any `IO`. A short
+    read is neither an error nor end-of-stream.
+
+  The type is complete and tested in isolation; wiring it into `HTTP2Server` so
+  a handler can be driven by it is the next step and is not yet done.
 - **`ServerResponse` can carry trailers.** `ServerResponse(status, body;
   trailers = [...])` emits them as a HEADERS block after the body. The last
   DATA frame is flagged `NGHTTP2_DATA_FLAG_NO_END_STREAM` so the body no
