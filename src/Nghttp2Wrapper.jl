@@ -100,7 +100,7 @@ export nghttp2_submit_request2, nghttp2_submit_response2,
        nghttp2_submit_headers, nghttp2_submit_settings,
        nghttp2_submit_ping, nghttp2_submit_goaway,
        nghttp2_submit_rst_stream, nghttp2_submit_window_update,
-       nghttp2_submit_push_promise
+       nghttp2_submit_push_promise, nghttp2_submit_trailer
 
 # Stream management
 export nghttp2_session_find_stream,

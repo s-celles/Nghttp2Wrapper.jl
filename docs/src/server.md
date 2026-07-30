@@ -58,6 +58,31 @@ ServerResponse(200,
 )
 ```
 
+## Trailers
+
+A trailing HEADERS block is sent *after* the response body and closes the
+stream (RFC 7540 §8.1). `nghttp2_submit_trailer` submits one:
+
+```julia
+nghttp2_submit_trailer(session, stream_id, [NVPair("grpc-status", "0")])
+```
+
+nghttp2 sets END_STREAM on the frame itself, so there is no flag argument. It
+validates `stream_id` eagerly — submitting on stream 0 returns
+`NGHTTP2_ERR_INVALID_ARGUMENT` (-501) — but defers the "does this stream exist"
+check to send time, so a positive id is accepted at submission even if the
+stream was never opened.
+
+This is what gRPC responses require: the status travels in the trailers, not in
+the response headers, so a server that cannot emit them cannot complete a gRPC
+call.
+
+!!! note "Not yet reachable from the buffered handler"
+    `HTTP2Server`'s handler returns a complete `ServerResponse`, so there is no
+    point at which it can emit trailers after a body. Using them today means
+    driving a session directly through the low-level API. An incremental
+    handler model is on the roadmap.
+
 ## Concurrent Connections
 
 The server handles multiple clients concurrently using a task-per-connection model:

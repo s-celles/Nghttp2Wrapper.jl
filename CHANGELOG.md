@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`nghttp2_submit_trailer`**, with a pointer-level entry point and an
+  `NVPair` convenience overload. A trailing HEADERS block is sent after the
+  response body and closes the stream (RFC 7540 §8.1).
+
+  This was a hard blocker for anything speaking gRPC on top of this package:
+  a gRPC response carries its status in the trailers, not in the response
+  headers, so no call could complete without it. Requested by gRPCServer.jl,
+  which is evaluating an `nghttp2` backend.
+
+  Documented return values are measured, not assumed: `stream_id` is validated
+  eagerly (0 gives `NGHTTP2_ERR_INVALID_ARGUMENT`, -501), while the existence
+  of the stream is only checked at send time.
+
 ## [0.2.0] — 2026-04-13
 
 ### Changed
