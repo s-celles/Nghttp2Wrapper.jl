@@ -221,6 +221,44 @@ it returns `NGHTTP2_ERR_DEFERRED` instead of EOF. On completion it sets
 `NGHTTP2_DATA_FLAG_EOF`, plus `NGHTTP2_DATA_FLAG_NO_END_STREAM` when trailers
 are pending — the mechanism already in place for buffered responses.
 
+### Status: the type is done, the wiring is not
+
+`ServerStream` and its `IO` surface are implemented and tested in isolation.
+Connecting it to `HTTP2Server` is the remaining work, and it is larger than it
+looks because of a constraint in the current connection loop.
+
+**The blocker.** `_server_connection_handler` is a blocking read:
+
+```julia
+while server.isopen && isopen(io)
+    nbytes = _read_tcp_chunk!(io, buf)          # blocks here
+    nghttp2_session_mem_recv2(session_ptr, buf[1:nbytes])
+    write(io, _session_send_all(session_ptr))
+end
+```
+
+Everything the server emits is emitted *in reaction to an inbound read*. In
+server-streaming the client sends its request and then goes quiet, so a handler
+producing messages has nothing to flush them to the socket: the stream stalls
+until the next inbound byte, which never comes. Wiring therefore also requires
+the loop to wake on "the handler wrote something".
+
+**Proposed shape** (not yet validated by implementation):
+
+- the handler runs in its own task, started when the headers arrive rather than
+  after the full body
+- a writer task waits on a condition held by the connection context; `write` on
+  the `ServerStream` signals it, and it calls `nghttp2_session_resume_data`
+  followed by `_session_send_all`
+- an nghttp2 session is **not thread-safe**, so both tasks must serialise every
+  call into it under a shared lock — including `mem_recv2` on the read side
+
+**Why it was stopped here.** This is a concurrency change inside a C binding,
+and it alters `HTTP2Server`'s execution model for every user, not just the
+streaming path. Done wrong it does not produce a failing test; it produces
+intermittent segfaults. It deserves a deliberate start rather than being
+tacked onto the end of the session that designed it.
+
 ## Platform Support
 
 nghttp2_jll provides `libnghttp2` for the following platforms:
