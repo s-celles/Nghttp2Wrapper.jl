@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ServerResponse` can carry trailers.** `ServerResponse(status, body;
+  trailers = [...])` emits them as a HEADERS block after the body. The last
+  DATA frame is flagged `NGHTTP2_DATA_FLAG_NO_END_STREAM` so the body no
+  longer closes the stream — the trailers do.
+
+  This is what makes trailers reachable from `HTTP2Server`: the binding alone
+  was only usable by driving a session through the low-level API. A gRPC
+  *unary* response is now expressible.
+
+  A trailers-only response (empty body) still goes through a data provider: a
+  `C_NULL` provider makes nghttp2 put END_STREAM on the HEADERS frame, leaving
+  no point at which trailers could follow.
+
+  The three-positional-argument `ServerResponse(status, headers, body)` form is
+  kept, so existing callers are unaffected.
 - **`nghttp2_submit_trailer`**, with a pointer-level entry point and an
   `NVPair` convenience overload. A trailing HEADERS block is sent after the
   response body and closes the stream (RFC 7540 §8.1).

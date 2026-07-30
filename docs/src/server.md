@@ -77,11 +77,24 @@ This is what gRPC responses require: the status travels in the trailers, not in
 the response headers, so a server that cannot emit them cannot complete a gRPC
 call.
 
-!!! note "Not yet reachable from the buffered handler"
-    `HTTP2Server`'s handler returns a complete `ServerResponse`, so there is no
-    point at which it can emit trailers after a body. Using them today means
-    driving a session directly through the low-level API. An incremental
-    handler model is on the roadmap.
+From a handler, return them on the response:
+
+```julia
+server = HTTP2Server(8080) do req
+    ServerResponse(200, "payload"; trailers = [NVPair("grpc-status", "0")])
+end
+```
+
+The last DATA frame is then flagged `NGHTTP2_DATA_FLAG_NO_END_STREAM`, so the
+body does not close the stream — the trailers do. A trailers-only response
+(empty body) works too.
+
+!!! note "Streaming is still buffered"
+    The handler returns a complete `ServerResponse`: the whole request body
+    arrives before it runs, and the whole response body is returned at once.
+    That is enough for a unary request/response exchange with trailers, but not
+    for emitting messages incrementally. An incremental handler model is on the
+    roadmap.
 
 ## Concurrent Connections
 
