@@ -19,6 +19,20 @@ function nghttp2_session_get_stream_user_data(session::Ptr{Cvoid}, stream_id::In
 end
 
 """
+    nghttp2_session_get_last_proc_stream_id(session) → Int32
+
+Return the ID of the last stream the session finished processing.
+
+This is the value a GOAWAY frame should carry: it tells the peer exactly how far
+its requests were honoured, so anything above it can safely be retried on a new
+connection (RFC 7540 §6.8).
+"""
+function nghttp2_session_get_last_proc_stream_id(session::Ptr{Cvoid})
+    ccall((:nghttp2_session_get_last_proc_stream_id, libnghttp2), Int32,
+          (Ptr{Cvoid},), session)
+end
+
+"""
     nghttp2_session_set_stream_user_data(session, stream_id, user_data) → Cint
 
 Set the user data associated with a stream.
