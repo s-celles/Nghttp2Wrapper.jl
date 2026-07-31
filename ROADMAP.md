@@ -259,6 +259,99 @@ streaming path. Done wrong it does not produce a failing test; it produces
 intermittent segfaults. It deserves a deliberate start rather than being
 tacked onto the end of the session that designed it.
 
+## Milestone 8 — Server configuration parity
+
+**Status**: Identified, not implemented.
+
+Three pieces of server configuration are declared by callers and then quietly
+dropped. All three were found while evaluating this package as a gRPC backend
+for gRPCServer.jl; none is hard, and the upstream support each needs already
+exists — that research is recorded here so it is not repeated.
+
+The common failure mode is what makes these worth fixing: a caller configures
+something, gets no error, and does not get the behaviour. Silence is worse than
+refusal.
+
+### 8.1 — SETTINGS are never sent
+
+`_server_connection_handler` submits an empty SETTINGS frame:
+
+```julia
+nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,
+                        Ptr{Nghttp2SettingsEntry}(C_NULL), 0)
+```
+
+So every connection runs on protocol defaults. A server cannot bound concurrent
+streams, adjust its initial window, or cap frame or header-list size — and
+gRPCServer.jl's `max_concurrent_streams` has no effect whatsoever when this
+package is the backend.
+
+Everything needed is already in place: `Nghttp2SettingsEntry` and the
+`NGHTTP2_SETTINGS_*` constants are defined and exported.
+
+The API question is the one worth deciding deliberately. Named keywords
+(`max_concurrent_streams = 100`) are discoverable and typo-proof but do not
+extend to settings we did not anticipate; a `Vector{Nghttp2SettingsEntry}` maps
+one-to-one onto nghttp2 but is ceremony for the common case. A hybrid — named
+keywords for the four a server realistically sets, with `nghttp2_submit_settings`
+left exported for the rest — is probably right.
+
+### 8.2 — `ServerRequest` carries no peer address
+
+```julia
+struct ServerRequest
+    method::String
+    path::String
+    headers::Vector{NVPair}
+    body::Vector{UInt8}
+    stream_id::Int32
+end
+```
+
+A handler cannot tell who is calling. That rules out per-client rate limiting,
+audit logging and IP-based access control, and it forces gRPCServer.jl's adapter
+to fabricate `PeerInfo(IPv4(0), 0)` — a zero it presents as fact.
+
+Reseau exposes `remote_addr(conn) -> Union{Nothing, SocketAddr}` for its TCP
+connections (`Reseau/src/3_tcp.jl`), and plain sockets have
+`Sockets.getpeername`. Both listener kinds can therefore answer.
+
+Adding a field to `ServerRequest` is the obvious shape, and it is technically
+breaking for anyone constructing one positionally. Keeping the existing
+five-argument outer constructor working makes it additive in practice.
+
+### 8.3 — TLS is only half-configurable
+
+`HTTP2Server` accepts `certfile` and `keyfile`, and nothing else:
+
+```julia
+tls_config = TLS.Config(cert_file = certfile, key_file = keyfile,
+                        alpn_protocols = ["h2"])
+```
+
+A caller asking for mutual TLS, a client CA, or a minimum protocol version has
+nowhere to say so. In gRPCServer.jl the consequence is concrete and dangerous:
+`TLSConfig` has `client_ca`, `require_client_cert` and `min_version`, and all
+three are silently discarded — you can configure mTLS and get a server that
+never verifies a client certificate, with no warning.
+
+Reseau's `TLS.Config` already carries the fields:
+
+| Need | Reseau field |
+|------|--------------|
+| client CA bundle | `client_ca_file` |
+| require/verify client certs | `client_auth::ClientAuthMode.T` |
+| minimum protocol version | `min_version::Union{Nothing, UInt16}` |
+
+`ClientAuthMode` offers `NoClientCert`, `RequestClientCert`,
+`RequireAnyClientCert`, `VerifyClientCertIfGiven` and
+`RequireAndVerifyClientCert`, and version constants `TLS1_2_VERSION` /
+`TLS1_3_VERSION` exist. So this is plumbing, not protocol work.
+
+One design note: asking for a client CA on a plaintext listener should raise
+rather than be ignored, since a silently non-verifying server is precisely the
+failure this milestone exists to remove.
+
 ## Platform Support
 
 ### Julia version floor
