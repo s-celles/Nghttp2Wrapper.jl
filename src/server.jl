@@ -54,6 +54,11 @@ mutable struct ServerContext
     # the GC root that keeps `ResponseBodySource` alive while nghttp2
     # holds a pointer to it via `nghttp2_data_source.ptr`.
     response_bodies::Dict{Int32,ResponseBodySource}
+    # True while the connection task is inside the receive/handle/send block,
+    # false while it is blocked waiting for the peer to send something. This is
+    # what `close` waits on: `streams` cannot serve the purpose, because a
+    # stream is deleted from it *before* its handler runs.
+    processing::Threads.Atomic{Bool}
 end
 
 """
@@ -88,6 +93,12 @@ mutable struct HTTP2Server
     connections::Vector{Task}
     isopen::Bool
     accept_task::Task
+    # Live connection contexts, so `close` can reach each session to send GOAWAY
+    # and each socket to unblock a read. Guarded by `contexts_lock`, which is
+    # never held while a `ServerContext.lock` is taken — the two locks must not
+    # nest, in either order.
+    contexts::Vector{ServerContext}
+    contexts_lock::ReentrantLock
 
     function HTTP2Server(handler::Function, port::Integer;
                          host::AbstractString="0.0.0.0",
@@ -105,7 +116,8 @@ mutable struct HTTP2Server
             Sockets.listen(Sockets.InetAddr(host, port))
         end
 
-        server = new(listener, handler, tls_config, Task[], true, Task(() -> nothing))
+        server = new(listener, handler, tls_config, Task[], true, Task(() -> nothing),
+                     ServerContext[], ReentrantLock())
         server.accept_task = Threads.@spawn _server_accept_loop(server)
         return server
     end
@@ -114,12 +126,100 @@ end
 # Do-block syntax: HTTP2Server(port) do req ... end
 # Julia passes the do-block function as first argument
 
-function Base.close(server::HTTP2Server)
-    if server.isopen
-        server.isopen = false
-        try; close(server.listener); catch; end
-        for t in server.connections
-            try; wait(t); catch; end
+"""
+Default grace period, in seconds, that `close` gives in-flight requests before
+it stops being polite.
+"""
+const DEFAULT_SHUTDOWN_TIMEOUT = 5.0
+
+"""
+How long, in seconds, `close` waits for connection tasks to notice their socket
+was closed. Only reached after the graceful phase has already given up, so it is
+short on purpose.
+"""
+const FORCED_SHUTDOWN_GRACE = 2.0
+
+"""
+    close(server::HTTP2Server; timeout = $(DEFAULT_SHUTDOWN_TIMEOUT))
+
+Shut the server down, bounded by `timeout` seconds.
+
+Three phases. The listener closes, so no new connection is accepted. Every live
+session is sent a GOAWAY (RFC 7540 §6.8) carrying the last stream it actually
+processed, so a peer knows precisely which requests to retry elsewhere. Then
+in-flight requests are given up to `timeout` seconds to finish, after which the
+remaining sockets are closed whether or not they are done.
+
+That last phase is what makes the bound real. A connection task spends its life
+blocked reading from the peer, and an idle peer sends nothing — so waiting for
+the task to return on its own is waiting forever. Closing the socket is what
+makes the read return.
+
+`close` never blocks indefinitely, and calling it twice is harmless.
+"""
+function Base.close(server::HTTP2Server; timeout::Real = DEFAULT_SHUTDOWN_TIMEOUT)
+    server.isopen || return nothing
+    server.isopen = false
+    try; close(server.listener); catch; end
+
+    contexts = lock(server.contexts_lock) do
+        copy(server.contexts)
+    end
+    tasks = copy(server.connections)
+
+    _send_goaway!(contexts)
+
+    # Graceful: let anything mid-request finish. An idle connection is not
+    # processing, so this returns at once in the common case.
+    settled = _await(() -> all(ctx -> !ctx.processing[], contexts), timeout)
+    settled || @debug "HTTP2Server: shutdown timeout elapsed with requests still in flight"
+
+    # Forced: close the sockets so the blocked reads return and the tasks exit.
+    for ctx in contexts
+        try; close(ctx.io_stream); catch; end
+    end
+    _await(() -> all(istaskdone, tasks), FORCED_SHUTDOWN_GRACE)
+
+    return nothing
+end
+
+"""
+Poll `predicate` until it holds or `seconds` elapse. Returns whether it held.
+"""
+function _await(predicate, seconds::Real)
+    deadline = time() + seconds
+    while true
+        predicate() && return true
+        time() >= deadline && return false
+        sleep(0.05)
+    end
+end
+
+"""
+Send a GOAWAY on every live session and flush it.
+
+Takes each `ServerContext.lock`, which the connection task also holds around its
+own session calls: an nghttp2 session is not thread-safe, and this runs on the
+caller's task, not the connection's. A context whose `session_ptr` is already
+`C_NULL` has been torn down and is skipped — that null is set under the same
+lock, before `nghttp2_session_del`.
+"""
+function _send_goaway!(contexts::Vector{ServerContext})
+    for ctx in contexts
+        try
+            lock(ctx.lock) do
+                ptr = ctx.session_ptr
+                ptr == C_NULL && return
+                last_id = nghttp2_session_get_last_proc_stream_id(ptr)
+                # Error code 0 is NO_ERROR: a clean shutdown, not a protocol
+                # failure (RFC 7540 §7).
+                nghttp2_submit_goaway(ptr, last_id, 0)
+                out = _session_send_all(ptr)
+                isempty(out) || write(ctx.io_stream, out)
+            end
+        catch
+            # A peer that has already vanished is not an error worth raising
+            # from a shutdown path.
         end
     end
     return nothing
@@ -149,18 +249,16 @@ function Base.show(io::IO, server::HTTP2Server)
 end
 
 """
-    shutdown!(server::HTTP2Server)
+    shutdown!(server::HTTP2Server; timeout = $(DEFAULT_SHUTDOWN_TIMEOUT))
 
-Gracefully shut down the server: stop accepting new connections,
-wait for in-flight requests to complete.
+Gracefully shut down the server: stop accepting new connections, tell peers with
+GOAWAY, and wait for in-flight requests to complete.
+
+An alias for [`close`](@ref), which it used to duplicate — including the
+unbounded wait that could never return against an idle peer.
 """
-function shutdown!(server::HTTP2Server)
-    server.isopen = false
-    try; close(server.listener); catch; end
-    for t in server.connections
-        try; wait(t); catch; end
-    end
-end
+shutdown!(server::HTTP2Server; timeout::Real = DEFAULT_SHUTDOWN_TIMEOUT) =
+    close(server; timeout = timeout)
 
 function _server_accept_loop(server::HTTP2Server)
     try
@@ -194,7 +292,11 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
         io,
         ReentrantLock(),
         Dict{Int32,ResponseBodySource}(),
+        Threads.Atomic{Bool}(false),
     )
+    lock(server.contexts_lock) do
+        push!(server.contexts, ctx)
+    end
 
     cb = Callbacks()
     nghttp2_session_callbacks_set_on_header_callback(cb.ptr, _server_on_header_cb_ptr())
@@ -206,6 +308,9 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
     if rv != 0
         close(cb)
         try; close(io); catch; end
+        lock(server.contexts_lock) do
+            filter!(!==(ctx), server.contexts)
+        end
         return
     end
     ctx.session_ptr = session_ptr
@@ -242,28 +347,52 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
                     break
                 end
 
-                try
-                    nghttp2_session_mem_recv2(session_ptr, buf[1:nbytes])
-                catch
-                    break
-                end
-
-                try
-                    outdata = _session_send_all(session_ptr)
-                    if !isempty(outdata)
-                        write(io, outdata)
+                # Mark the task busy for the whole receive/handle/send block:
+                # the handler runs synchronously inside `mem_recv2`, and the
+                # response it submits is only flushed by the `write` below.
+                # `close` waits on this flag, so it must stay set until the
+                # response has actually reached the socket.
+                ctx.processing[] = true
+                broke = try
+                    # An nghttp2 session is not thread-safe and `close` reaches
+                    # into it from another task to send GOAWAY. Every call into
+                    # the session is serialised on this lock; the blocking read
+                    # above deliberately stays outside it. The frame callbacks
+                    # take the same lock, which is why it is reentrant.
+                    lock(ctx.lock) do
+                        nghttp2_session_mem_recv2(session_ptr, buf[1:nbytes])
+                        outdata = _session_send_all(session_ptr)
+                        isempty(outdata) || write(io, outdata)
                     end
+                    false
                 catch
-                    break
+                    true
+                finally
+                    ctx.processing[] = false
                 end
+                broke && break
             end
         catch
         end
 
         # Cleanup (inside GC.@preserve so ctx is alive during session_del)
-        nghttp2_session_del(session_ptr)
+        #
+        # Null the pointer under the same lock `_send_goaway!` takes, and do it
+        # *before* freeing the session: a concurrent `close` must either get the
+        # lock first and use a live session, or find C_NULL and skip. Anything
+        # else is a use-after-free.
+        lock(ctx.lock) do
+            ctx.session_ptr = C_NULL
+            nghttp2_session_del(session_ptr)
+        end
         close(cb)
         try; close(io); catch; end
+    end
+
+    # Deregister outside any ServerContext lock — see the note on
+    # HTTP2Server.contexts_lock about the two locks never nesting.
+    lock(server.contexts_lock) do
+        filter!(!==(ctx), server.contexts)
     end
 end
 

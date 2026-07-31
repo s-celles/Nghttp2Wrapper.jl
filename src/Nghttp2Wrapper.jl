@@ -107,6 +107,7 @@ export nghttp2_submit_request2, nghttp2_submit_response2,
 export nghttp2_session_find_stream,
        nghttp2_session_get_stream_user_data,
        nghttp2_session_set_stream_user_data,
+       nghttp2_session_get_last_proc_stream_id,
        nghttp2_session_get_stream_effective_local_window_size,
        nghttp2_session_get_stream_effective_recv_data_length
 

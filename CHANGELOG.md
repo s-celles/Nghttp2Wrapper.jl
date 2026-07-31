@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`close(server)` is now bounded and tells the peer.** It used to close the
+  listener and then `wait` on every connection task with no bound. A connection
+  task spends its life blocked reading from its peer, and an idle peer sends
+  nothing — so `close` could not return: the loop condition
+  `while server.isopen && isopen(io)` is only re-tested once the read returns.
+  A single connected, silent client was enough to hang shutdown forever.
+
+  Shutdown now runs in three phases. The listener closes. Every live session is
+  sent a **GOAWAY** (RFC 7540 §6.8) carrying the last stream it actually
+  processed — via the new `nghttp2_session_get_last_proc_stream_id` binding — so
+  a peer knows precisely which requests are safe to retry elsewhere. In-flight
+  requests then get up to `timeout` seconds, after which the remaining sockets
+  are closed regardless, which is what makes the reads return.
+
+      close(server)                 # 5 s grace, the default
+      close(server; timeout = 30)   # long-running handlers
+      close(server; timeout = 0)    # immediate
+
+  `shutdown!` was a copy of the same unbounded loop and is now an alias for
+  `close`, keyword included.
+
+  Two implementation notes, both load-bearing:
+
+  - An nghttp2 session is **not thread-safe**, and `close` now reaches into one
+    from a task that is not the connection's. Every call into a session is
+    serialised on `ServerContext.lock`; the blocking read stays outside it.
+  - `ServerContext.session_ptr` is set to `C_NULL` under that same lock
+    *before* `nghttp2_session_del`, so a concurrent `close` either wins the lock
+    and finds a live session or finds the null and skips it. Without that
+    ordering the GOAWAY path is a use-after-free.
+
+  Waiting on in-flight work needed a new signal rather than the existing stream
+  table: a stream is deleted from `ServerContext.streams` *before* its handler
+  runs, so the table is empty for exactly the window that matters.
+
+### Added
+
+- **`nghttp2_session_get_last_proc_stream_id`** — the ID of the last stream a
+  session finished processing. This is the value a GOAWAY frame should carry.
+
 ## [0.2.1] — 2026-07-30
 
 ### Fixed
