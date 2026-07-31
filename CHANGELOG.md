@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-31
+
+### Changed
+
+- **`close(server)` is bounded, and no longer waits indefinitely.** This is why
+  the release is 0.3.0 and not a patch: shutdown had an observable behaviour,
+  and it changed.
+
+  A handler that runs longer than the grace period now has its connection closed
+  underneath it, where previously `close` would keep waiting. Pass a longer
+  `timeout` if your handlers are slow:
+
+      close(server)                 # 5 s grace, the default
+      close(server; timeout = 30)   # long-running handlers
+      close(server; timeout = 0)    # immediate
+
+  In practice the old behaviour was rarely something to rely on — see below.
+
 ### Fixed
 
 - **`close(server)` is now bounded and tells the peer.** It used to close the
