@@ -1,27 +1,39 @@
 @testitem "concurrent connections" begin
     using Nghttp2Wrapper, Sockets
-    call_count = Ref(0)
+    # Atomic, not `Ref(0)`. Three connections are now in flight at once, and
+    # their handlers run on different tasks: `count[] += 1` is a load, an add
+    # and a store, so concurrent increments are lost. That is what made this
+    # test report "1 >= 3" while the server had in fact served all three.
+    call_count = Threads.Atomic{Int}(0)
+
+    function connect_retry(port)
+        for _ in 1:50
+            try
+                return Sockets.connect("127.0.0.1", port)
+            catch
+                sleep(0.2)
+            end
+        end
+        return nothing
+    end
 
     server = HTTP2Server(0) do req
-        call_count[] += 1
-        ServerResponse(200, "Response $(call_count[])")
+        n = Threads.atomic_add!(call_count, 1) + 1
+        ServerResponse(200, "Response $(n)")
     end
     port = Nghttp2Wrapper.listener_port(server)
 
-    # Connect multiple clients (with retry on each connect)
+    # Open every connection, send every request, and only then close anything.
+    #
+    # Each client used to sleep 0.5s after writing and close regardless. That is
+    # an arbitrary window on how long the server may take to read, and closing
+    # first loses the request outright — so on a loaded machine one of the three
+    # calls simply never happened and the test failed by two-against-three.
+    # Holding the connections open until the server has answered removes the
+    # race rather than widening it.
+    conns = Any[]
     for i in 1:3
-        local tcp = let
-            result = nothing
-            for _ in 1:50
-                try
-                    result = Sockets.connect("127.0.0.1", port)
-                    break
-                catch
-                    sleep(0.2)
-                end
-            end
-            result
-        end
+        tcp = connect_retry(port)
         tcp === nothing && error("Could not connect to server")
         cb = Callbacks()
         rv, session_ptr = nghttp2_session_client_new(cb.ptr)
@@ -36,18 +48,21 @@
         end
         out = Nghttp2Wrapper._session_send_all(session_ptr)
         write(tcp, out)
-        sleep(0.5)  # let server read request before closing connection
-        nghttp2_session_del(session_ptr)
-        close(cb)
-        close(tcp)
+        flush(tcp)
+        push!(conns, (tcp, session_ptr, cb))
     end
 
-    for _ in 1:50
-        yield()
-        sleep(0.2)
-        call_count[] >= 3 && break
+    deadline = time() + 30
+    while call_count[] < 3 && time() < deadline
+        sleep(0.05)
     end
 
     @test call_count[] >= 3
+
+    for (tcp, session_ptr, cb) in conns
+        nghttp2_session_del(session_ptr)
+        close(cb)
+        try; close(tcp); catch; end
+    end
     close(server)
 end

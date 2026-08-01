@@ -108,6 +108,7 @@ export nghttp2_session_find_stream,
        nghttp2_session_get_stream_user_data,
        nghttp2_session_set_stream_user_data,
        nghttp2_session_get_last_proc_stream_id,
+       nghttp2_session_resume_data,
        nghttp2_session_get_stream_effective_local_window_size,
        nghttp2_session_get_stream_effective_recv_data_length
 
@@ -141,6 +142,7 @@ export post, put, patch, head, options
 
 # Milestone 4: HTTP/2 Server
 export HTTP2Server, ServerStream, setstatus, setheader, settrailer, ServerRequest, ServerResponse
+export request_method, request_path, request_headers
 
 # Milestone 6: Advanced Features
 export PrioritySpec

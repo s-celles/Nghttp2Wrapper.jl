@@ -96,6 +96,61 @@ body does not close the stream — the trailers do. A trailers-only response
     for emitting messages incrementally. An incremental handler model is on the
     roadmap.
 
+## Incremental Handlers
+
+The handler shown above is *buffered*: it receives a complete `ServerRequest` and
+returns a complete `ServerResponse`. That is enough whenever the response is one
+piece, but it cannot emit messages as they are produced — the reply only reaches
+the peer once the handler returns.
+
+Pass `streaming = true` and the handler receives a [`ServerStream`](@ref)
+instead:
+
+```julia
+server = HTTP2Server(8080; streaming = true) do stream
+    setstatus(stream, 200)
+    setheader(stream, "content-type", "text/event-stream")
+    for i in 1:5
+        write(stream, Vector{UInt8}("event $i\n"))
+        sleep(1)
+    end
+end
+```
+
+Each `write` reaches the peer when it happens, not five seconds later.
+
+`ServerStream` subtypes `IO`, so the request side needs no new vocabulary —
+`eof`, `read`, `readavailable` and `readbytes!` mean what they already mean —
+and the request head is available through `request_method`, `request_path` and
+`request_headers`.
+
+The response is submitted on the first `write` or when the handler returns,
+whichever comes first. That is why status and headers must be staged **before**
+the first write: afterwards the headers are already on the wire.
+
+!!! warning "`read(stream, n)` returns *at most* `n` bytes"
+    As for any `IO`. A short read is neither an error nor end-of-stream — it
+    means that much was buffered. Loop until you have what you need, or until
+    the peer half-closes. Assuming otherwise caps every request at the HTTP/2
+    flow-control window.
+
+Trailers work as they do for buffered responses: `settrailer` stages a trailing
+HEADERS block, and it — not the body — closes the stream.
+
+```julia
+server = HTTP2Server(8080; streaming = true) do stream
+    setstatus(stream, 200)
+    write(stream, payload)
+    settrailer(stream, NVPair("grpc-status", "0"))
+end
+```
+
+A handler that throws still terminates its stream: the status becomes 500 if it
+had not set one, and the stream is closed, so the peer is never left waiting.
+
+`close(server)` waits for incremental handlers in flight just as it does for
+buffered ones, up to its `timeout`.
+
 ## Concurrent Connections
 
 The server handles multiple clients concurrently using a task-per-connection model:
