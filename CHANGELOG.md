@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A forced `close` no longer waits for a busy handler.** `close(server;
+  timeout = 0)` took exactly as long as the slowest running handler — the
+  opposite of what asking for zero grace means.
+
+  The cause was in the GOAWAY step, added alongside bounded shutdown in 0.3.0.
+  Sending GOAWAY needs the connection's lock, and the connection task holds that
+  lock across its whole receive/handle/send block — so a handler mid-flight
+  holds it for as long as it runs, and `close` blocked there before it ever
+  reached the socket close that actually bounds shutdown.
+
+  The wait for that lock is now bounded at 0.25s. A connection that cannot be
+  reached in time is skipped and retried after the graceful phase, once it is
+  idle, so the courtesy is still paid whenever there is any opportunity to pay
+  it. GOAWAY is a courtesy; the socket close that follows is not.
+
+  Found from downstream: gRPCServer.jl's nghttp2 adapter maps its `force` flag
+  onto `timeout = 0`, and a test asserting that a forced stop does not wait out
+  a four-second handler measured 4.21s.
+
 ## [0.3.0] — 2026-07-31
 
 ### Changed
