@@ -31,6 +31,7 @@ mutable struct ServerStream <: IO
     method::String
     path::String
     request_headers::Vector{NVPair}
+    peer::Union{Nothing,Sockets.InetAddr}
 
     # Request side, fed by the on-data-chunk callback.
     request_buffer::Vector{UInt8}
@@ -55,9 +56,10 @@ end
 function ServerStream(id::Integer; method::AbstractString = "",
                       path::AbstractString = "",
                       headers::Vector{NVPair} = NVPair[],
-                      wake::Union{Nothing,Base.Event} = nothing)
+                      wake::Union{Nothing,Base.Event} = nothing,
+                      peer::Union{Nothing,Sockets.InetAddr} = nothing)
     l = ReentrantLock()
-    ServerStream(Int32(id), String(method), String(path), headers,
+    ServerStream(Int32(id), String(method), String(path), headers, peer,
                  UInt8[], false, nothing, NVPair[], UInt8[], NVPair[],
                  false, l, Threads.Condition(l), wake)
 end
@@ -84,6 +86,13 @@ request_path(s::ServerStream) = s.path
 The request headers, pseudo-headers excluded.
 """
 request_headers(s::ServerStream) = copy(s.request_headers)
+
+"""
+    peer_address(stream) -> Union{Nothing,Sockets.InetAddr}
+
+The remote endpoint this stream's connection came from.
+"""
+peer_address(s::ServerStream) = s.peer
 
 # --- fed by the connection callbacks ---
 

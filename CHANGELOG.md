@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+
+- **Server SETTINGS are configurable** (ROADMAP Milestone 8.1). `HTTP2Server`
+  submitted an empty SETTINGS frame on every connection, so every server ran on
+  protocol defaults and could not bound concurrent streams or adjust its window,
+  frame or header-list limits — a caller's configuration was simply dropped.
+
+  ```julia
+  HTTP2Server(8080; max_concurrent_streams = 100, initial_window_size = 1 << 20)
+  ```
+
+  Named keywords rather than a `Vector{Nghttp2SettingsEntry}`: these four are
+  what a server realistically sets, and the entry form is ceremony for them.
+  Anything else remains reachable through the exported
+  `nghttp2_submit_settings`. A setting left unset is **not sent**, so the
+  default is unchanged and no existing server's protocol behaviour moves.
+- **`peer_address`** (ROADMAP Milestone 8.2), on both `ServerRequest` and
+  `ServerStream`. A handler could not tell who was calling, which ruled out
+  per-client rate limiting, audit logging and address-based access control, and
+  forced gRPCServer.jl's adapter to present a fabricated zero as fact.
+
+  Returns a `Sockets.InetAddr`, or `nothing` when the endpoint cannot be
+  resolved, so a caller can tell "unknown" from an address. Works for both
+  listener kinds — Reseau caches it on TLS connections, plain sockets answer
+  `getpeername`.
+
+  `ServerRequest` gains a field; its five-argument constructor is kept, so
+  existing callers are unaffected.
+
+
+
 - **Incremental server handlers** (ROADMAP Milestone 7). `HTTP2Server(port;
   streaming = true)` hands the handler a `ServerStream` instead of a complete
   `ServerRequest`, so a response is emitted as it is produced rather than
@@ -49,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incremental handler's later writes are never collected.
 
 ### Fixed
+
 
 - **A forced `close` no longer waits for a busy handler.** `close(server;
   timeout = 0)` took exactly as long as the slowest running handler — the

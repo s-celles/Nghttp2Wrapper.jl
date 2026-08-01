@@ -96,6 +96,40 @@ body does not close the stream — the trailers do. A trailers-only response
     for emitting messages incrementally. An incremental handler model is on the
     roadmap.
 
+## Server Settings
+
+A server sends its HTTP/2 SETTINGS on every new connection. By default it sends
+an empty frame — the required handshake and nothing more. Name what you want and
+only that is sent:
+
+```julia
+server = HTTP2Server(8080; max_concurrent_streams = 100,
+                           initial_window_size = 1 << 20) do req
+    ServerResponse(200, "OK")
+end
+```
+
+Available: `max_concurrent_streams`, `initial_window_size`, `max_frame_size` and
+`max_header_list_size`. A setting left unset is not sent, so protocol defaults
+apply. For anything outside these four, `nghttp2_submit_settings` is exported.
+
+## Knowing Who Is Calling
+
+`peer_address` returns the remote endpoint of the connection a request arrived
+on, as a `Sockets.InetAddr`:
+
+```julia
+server = HTTP2Server(8080) do req
+    @info "request" from = peer_address(req) path = req.path
+    ServerResponse(200, "OK")
+end
+```
+
+It works for both listener kinds and for incremental handlers
+(`peer_address(stream)`). It returns `nothing` when the endpoint cannot be
+resolved — a peer that has already gone, say — rather than a fabricated
+address, so a caller rate-limiting or logging on it can tell the difference.
+
 ## Incremental Handlers
 
 The handler shown above is *buffered*: it receives a complete `ServerRequest` and

@@ -59,6 +59,9 @@ mutable struct ServerContext
     # what `close` waits on: `streams` cannot serve the purpose, because a
     # stream is deleted from it *before* its handler runs.
     processing::Threads.Atomic{Bool}
+    # Resolved once, when the connection is accepted: a socket that has since
+    # been torn down can no longer answer `getpeername`.
+    peer::Union{Nothing,Sockets.InetAddr}
 
     # --- incremental handler (streaming = true) ---
     streaming::Bool
@@ -113,12 +116,35 @@ mutable struct HTTP2Server
     contexts::Vector{ServerContext}
     contexts_lock::ReentrantLock
     streaming::Bool
+    settings::Vector{Nghttp2SettingsEntry}
 
     function HTTP2Server(handler::Function, port::Integer;
                          host::AbstractString="0.0.0.0",
                          certfile::AbstractString="",
                          keyfile::AbstractString="",
-                         streaming::Bool=false)
+                         streaming::Bool=false,
+                         max_concurrent_streams::Union{Nothing,Integer}=nothing,
+                         initial_window_size::Union{Nothing,Integer}=nothing,
+                         max_frame_size::Union{Nothing,Integer}=nothing,
+                         max_header_list_size::Union{Nothing,Integer}=nothing)
+        # Named keywords rather than a raw Vector{Nghttp2SettingsEntry}: these
+        # four are what a server realistically sets, and `max_concurrent_streams
+        # = 100` says what it means where the entry form is ceremony. Anything
+        # else remains reachable through the exported
+        # `nghttp2_submit_settings`.
+        #
+        # A setting left at `nothing` is *not sent*. Sending values nobody asked
+        # for would change protocol behaviour for every existing user.
+        settings = Nghttp2SettingsEntry[]
+        for (id, value) in ((NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, max_concurrent_streams),
+                            (NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, initial_window_size),
+                            (NGHTTP2_SETTINGS_MAX_FRAME_SIZE, max_frame_size),
+                            (NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, max_header_list_size))
+            value === nothing && continue
+            (value < 0 || value > typemax(UInt32)) &&
+                throw(ArgumentError("SETTINGS value out of range: $value"))
+            push!(settings, Nghttp2SettingsEntry(id, UInt32(value)))
+        end
         tls_config = nothing
         listener = if !isempty(certfile) && !isempty(keyfile)
             tls_config = TLS.Config(
@@ -132,7 +158,7 @@ mutable struct HTTP2Server
         end
 
         server = new(listener, handler, tls_config, Task[], true, Task(() -> nothing),
-                     ServerContext[], ReentrantLock(), streaming)
+                     ServerContext[], ReentrantLock(), streaming, settings)
         server.accept_task = Threads.@spawn _server_accept_loop(server)
         return server
     end
@@ -310,6 +336,41 @@ function listener_port(server::HTTP2Server)
     end
 end
 
+"""
+    _settings_entries(server) -> Vector{Nghttp2SettingsEntry}
+
+The SETTINGS this server sends on every new connection. Empty unless the caller
+asked for something.
+"""
+_settings_entries(server::HTTP2Server) = server.settings
+
+"""
+    _peer_address(io) -> Union{Nothing,Sockets.InetAddr}
+
+The remote endpoint of a connection, for both listener kinds.
+
+Reseau caches it on its TLS connections, plain sockets answer `getpeername`, and
+either can fail on a peer that has already gone — in which case a handler is
+told `nothing` rather than being handed a fabricated zero.
+"""
+function _peer_address(io)
+    try
+        if io isa TLS.Conn
+            addr = TCP.remote_addr(io)
+            addr === nothing && return nothing
+            return Sockets.InetAddr(Sockets.IPv4(UInt32(addr.ip[1]) << 24 |
+                                                 UInt32(addr.ip[2]) << 16 |
+                                                 UInt32(addr.ip[3]) << 8 |
+                                                 UInt32(addr.ip[4])),
+                                    Int(addr.port))
+        end
+        host, port = Sockets.getpeername(io)
+        return Sockets.InetAddr(host, Int(port))
+    catch
+        return nothing
+    end
+end
+
 function Base.show(io::IO, server::HTTP2Server)
     state = server.isopen ? "listening" : "closed"
     n = length(server.connections)
@@ -361,6 +422,7 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
         ReentrantLock(),
         Dict{Int32,ResponseBodySource}(),
         Threads.Atomic{Bool}(false),
+        _peer_address(io),
         server.streaming,
         Dict{Int32,ServerStream}(),
         Set{Int32}(),
@@ -388,9 +450,15 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
     end
     ctx.session_ptr = session_ptr
 
-    # Send server settings
-    nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,
-                            Ptr{Nghttp2SettingsEntry}(C_NULL), 0)
+    # Send server settings. An empty vector submits an empty SETTINGS frame,
+    # which is the required handshake and the historical behaviour.
+    entries = _settings_entries(server)
+    GC.@preserve entries begin
+        nghttp2_submit_settings(session_ptr, NGHTTP2_FLAG_NONE,
+                                isempty(entries) ? Ptr{Nghttp2SettingsEntry}(C_NULL) :
+                                                   pointer(entries),
+                                length(entries))
+    end
     outdata = _session_send_all(session_ptr)
     if !isempty(outdata)
         try; write(io, outdata); catch; end
@@ -726,7 +794,7 @@ function _server_on_frame_recv_cb(session_ptr::Ptr{Cvoid}, frame_ptr::Ptr{Cvoid}
                 if st !== nothing && !haskey(ctx.server_streams, stream_id)
                     stream = ServerStream(stream_id; method = st.method,
                                           path = st.path, headers = st.headers,
-                                          wake = ctx.wake)
+                                          wake = ctx.wake, peer = ctx.peer)
                     isempty(st.body) || push_request_data!(stream, st.body)
                     lock(ctx.lock) do
                         ctx.server_streams[stream_id] = stream
@@ -753,7 +821,8 @@ function _server_on_frame_recv_cb(session_ptr::Ptr{Cvoid}, frame_ptr::Ptr{Cvoid}
             end
             if st !== nothing && !isempty(st.method)
                 # Dispatch to handler
-                req = ServerRequest(st.method, st.path, st.headers, st.body, st.id)
+                req = ServerRequest(st.method, st.path, st.headers, st.body, st.id,
+                                    ctx.peer)
                 resp = try
                     ctx.handler(req)
                 catch

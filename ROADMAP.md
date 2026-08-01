@@ -271,7 +271,7 @@ here.
 
 ## Milestone 8 — Server configuration parity
 
-**Status**: Identified, not implemented.
+**Status**: 8.1 and 8.2 implemented; 8.3 outstanding.
 
 Three pieces of server configuration are declared by callers and then quietly
 dropped. All three were found while evaluating this package as a gRPC backend
@@ -282,7 +282,7 @@ The common failure mode is what makes these worth fixing: a caller configures
 something, gets no error, and does not get the behaviour. Silence is worse than
 refusal.
 
-### 8.1 — SETTINGS are never sent
+### 8.1 — SETTINGS are never sent — **done**
 
 `_server_connection_handler` submits an empty SETTINGS frame:
 
@@ -306,7 +306,7 @@ one-to-one onto nghttp2 but is ceremony for the common case. A hybrid — named
 keywords for the four a server realistically sets, with `nghttp2_submit_settings`
 left exported for the rest — is probably right.
 
-### 8.2 — `ServerRequest` carries no peer address
+### 8.2 — `ServerRequest` carries no peer address — **done**
 
 ```julia
 struct ServerRequest
@@ -330,7 +330,14 @@ Adding a field to `ServerRequest` is the obvious shape, and it is technically
 breaking for anyone constructing one positionally. Keeping the existing
 five-argument outer constructor working makes it additive in practice.
 
-### 8.3 — TLS is only half-configurable
+### 8.3 — TLS is only half-configurable — **outstanding**
+
+Needs test fixtures before it needs code: `test/fixtures/` has only a server
+certificate and key, so there is no CA and no client certificate to verify
+against, and mutual TLS cannot be tested at all. Generating those is the first
+step, not an afterthought — an mTLS path that is implemented but unverified is
+the same silent-failure shape this milestone exists to remove.
+
 
 `HTTP2Server` accepts `certfile` and `keyfile`, and nothing else:
 
