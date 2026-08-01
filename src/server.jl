@@ -167,12 +167,17 @@ function Base.close(server::HTTP2Server; timeout::Real = DEFAULT_SHUTDOWN_TIMEOU
     end
     tasks = copy(server.connections)
 
-    _send_goaway!(contexts)
+    # Best-effort: a connection whose lock is held by a running handler is
+    # skipped rather than waited on, and retried below once it is idle.
+    unreached = _send_goaway!(contexts)
 
     # Graceful: let anything mid-request finish. An idle connection is not
     # processing, so this returns at once in the common case.
     settled = _await(() -> all(ctx -> !ctx.processing[], contexts), timeout)
     settled || @debug "HTTP2Server: shutdown timeout elapsed with requests still in flight"
+
+    # Those connections are idle now, so the courtesy they missed can be paid.
+    isempty(unreached) || _send_goaway!(unreached)
 
     # Forced: close the sockets so the blocked reads return and the tasks exit.
     for ctx in contexts
@@ -196,20 +201,38 @@ function _await(predicate, seconds::Real)
 end
 
 """
-Send a GOAWAY on every live session and flush it.
+How long, in seconds, `close` will wait for a connection's lock in order to send
+it a GOAWAY. Short on purpose — see `_send_goaway!`.
+"""
+const GOAWAY_LOCK_WAIT = 0.25
+
+"""
+Send a GOAWAY on every live session it can reach, and return the ones it could
+not.
 
 Takes each `ServerContext.lock`, which the connection task also holds around its
 own session calls: an nghttp2 session is not thread-safe, and this runs on the
 caller's task, not the connection's. A context whose `session_ptr` is already
 `C_NULL` has been torn down and is skipped — that null is set under the same
 lock, before `nghttp2_session_del`.
+
+The wait for that lock is **bounded**, because the connection task holds it for
+its whole receive/handle/send block: a handler mid-flight holds it too, for as
+long as it runs. Blocking here made `close(server; timeout = 0)` take exactly as
+long as the slowest running handler — the opposite of what a caller asking for
+zero grace wants. GOAWAY is a courtesy; the socket close that follows is not.
+Contexts skipped here are returned so the caller can retry once they are idle.
 """
 function _send_goaway!(contexts::Vector{ServerContext})
+    unreached = ServerContext[]
     for ctx in contexts
+        if !_acquire_for(ctx.lock, GOAWAY_LOCK_WAIT)
+            push!(unreached, ctx)
+            continue
+        end
         try
-            lock(ctx.lock) do
-                ptr = ctx.session_ptr
-                ptr == C_NULL && return
+            ptr = ctx.session_ptr
+            if ptr != C_NULL
                 last_id = nghttp2_session_get_last_proc_stream_id(ptr)
                 # Error code 0 is NO_ERROR: a clean shutdown, not a protocol
                 # failure (RFC 7540 §7).
@@ -220,9 +243,23 @@ function _send_goaway!(contexts::Vector{ServerContext})
         catch
             # A peer that has already vanished is not an error worth raising
             # from a shutdown path.
+        finally
+            unlock(ctx.lock)
         end
     end
-    return nothing
+    return unreached
+end
+
+"""
+Acquire `l` within `seconds`, returning whether it was acquired.
+"""
+function _acquire_for(l::ReentrantLock, seconds::Real)
+    deadline = time() + seconds
+    while true
+        trylock(l) && return true
+        time() >= deadline && return false
+        sleep(0.01)
+    end
 end
 
 Base.isopen(server::HTTP2Server) = server.isopen

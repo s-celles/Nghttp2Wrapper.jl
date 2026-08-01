@@ -279,3 +279,77 @@ end
     close(cb)
     try; close(sock); catch; end
 end
+
+@testitem "a forced close does not wait for a busy handler" begin
+    using Nghttp2Wrapper, Sockets
+
+    function connect_retry(port)
+        for _ in 1:50
+            try
+                return Sockets.connect("127.0.0.1", port)
+            catch
+                sleep(0.2)
+            end
+        end
+        return nothing
+    end
+
+    function await_flag(flag, seconds)
+        deadline = time() + seconds
+        while !flag[] && time() < deadline
+            sleep(0.05)
+        end
+        return flag[]
+    end
+
+    function await(t, seconds)
+        deadline = time() + seconds
+        while !istaskdone(t) && time() < deadline
+            sleep(0.05)
+        end
+        return istaskdone(t)
+    end
+
+    entered = Ref(false)
+    server = HTTP2Server(0) do req
+        entered[] = true
+        sleep(4.0)
+        ServerResponse(200, "slow")
+    end
+    port = Nghttp2Wrapper.listener_port(server)
+
+    sock = connect_retry(port)
+    @test sock !== nothing
+
+    cb = Callbacks()
+    rv, session = nghttp2_session_client_new(cb.ptr)
+    @test rv == 0
+    nghttp2_submit_settings(session, NGHTTP2_FLAG_NONE,
+                            Ptr{Nghttp2SettingsEntry}(C_NULL), 0)
+    headers = [NVPair(":method", "POST"), NVPair(":path", "/busy"),
+               NVPair(":scheme", "http"), NVPair(":authority", "localhost")]
+    nva = [to_nghttp2_nv(nv) for nv in headers]
+    GC.@preserve headers nva begin
+        nghttp2_submit_request2(session, C_NULL, pointer(nva), length(nva),
+                                C_NULL, C_NULL)
+        write(sock, Nghttp2Wrapper._session_send_all(session))
+        flush(sock)
+    end
+
+    @test await_flag(entered, 15.0)
+
+    # The connection task holds its lock for the whole receive/handle/send
+    # block, so a handler mid-flight holds it too. Sending GOAWAY needs that
+    # lock — but GOAWAY is a courtesy, and a caller asking for zero grace is
+    # asking not to wait. Blocking here made `timeout = 0` take as long as the
+    # handler.
+    started = time()
+    t = Threads.@spawn close(server; timeout = 0.0)
+    @test await(t, 30.0)
+    @test !istaskfailed(t)
+    @test time() - started < 3.0
+
+    nghttp2_session_del(session)
+    close(cb)
+    try; close(sock); catch; end
+end
