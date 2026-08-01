@@ -152,7 +152,7 @@ This document outlines the development roadmap for Nghttp2Wrapper.jl, a Julia wr
 
 ## Milestone 7 — Incremental server handler (`ServerStream <: IO`)
 
-**Status**: Designed, not implemented.
+**Status**: Implemented.
 
 The buffered handler (`ServerRequest` → `ServerResponse`) delivers the whole
 request body before running and takes the whole response body at once. With
@@ -221,43 +221,53 @@ it returns `NGHTTP2_ERR_DEFERRED` instead of EOF. On completion it sets
 `NGHTTP2_DATA_FLAG_EOF`, plus `NGHTTP2_DATA_FLAG_NO_END_STREAM` when trailers
 are pending — the mechanism already in place for buffered responses.
 
-### Status: the type is done, the wiring is not
+### How the wiring works
 
-`ServerStream` and its `IO` surface are implemented and tested in isolation.
-Connecting it to `HTTP2Server` is the remaining work, and it is larger than it
-looks because of a constraint in the current connection loop.
+`_server_connection_handler` is a blocking read, and everything the server
+emitted was emitted *in reaction to an inbound read*. In server streaming the
+peer sends its request and then goes quiet, so a handler producing messages had
+nothing to flush them to the socket: the stream stalled until the next inbound
+byte, which never came.
 
-**The blocker.** `_server_connection_handler` is a blocking read:
+Three pieces resolve that:
 
-```julia
-while server.isopen && isopen(io)
-    nbytes = _read_tcp_chunk!(io, buf)          # blocks here
-    nghttp2_session_mem_recv2(session_ptr, buf[1:nbytes])
-    write(io, _session_send_all(session_ptr))
-end
-```
+- **The handler runs in its own task**, started when HEADERS arrive rather than
+  after the full body, so it can read the request as it arrives and answer
+  before the request is complete.
+- **A per-connection writer task** waits on a `Base.Event` that `ServerStream`
+  raises on `write` and `close`. It calls `nghttp2_session_resume_data`, then
+  `_session_send_all`, then writes to the socket. That event is what turns "the
+  handler wrote something" into something the connection can act on.
+- **Every call into the session is serialised** on `ServerContext.lock`, since
+  an nghttp2 session is not thread-safe and the reader and writer tasks share
+  one. The blocking read stays outside that lock, or it would hold it forever.
 
-Everything the server emits is emitted *in reaction to an inbound read*. In
-server-streaming the client sends its request and then goes quiet, so a handler
-producing messages has nothing to flush them to the socket: the stream stalls
-until the next inbound byte, which never comes. Wiring therefore also requires
-the loop to wake on "the handler wrote something".
+The data provider gains a third answer beside "here are bytes" and "that is
+all": `NGHTTP2_ERR_DEFERRED`, meaning *ask again after
+`nghttp2_session_resume_data`*. Without it nghttp2 treats the first empty read
+as end-of-response and closes the stream under a handler that had more to say.
 
-**Proposed shape** (not yet validated by implementation):
+Two details are load-bearing and easy to get wrong:
 
-- the handler runs in its own task, started when the headers arrive rather than
-  after the full body
-- a writer task waits on a condition held by the connection context; `write` on
-  the `ServerStream` signals it, and it calls `nghttp2_session_resume_data`
-  followed by `_session_send_all`
-- an nghttp2 session is **not thread-safe**, so both tasks must serialise every
-  call into it under a shared lock — including `mem_recv2` on the read side
+- The wake is raised by `write` and `close`, **never** by `setstatus` or
+  `setheader`. The connection submits the response headers on the first wake, so
+  waking on `setstatus` would race a handler that sets its status first and its
+  headers second — and send the response without them.
+- The writer task is stopped, and waited for, *before* `nghttp2_session_del`.
+  It calls into the session that would otherwise be freed underneath it.
 
-**Why it was stopped here.** This is a concurrency change inside a C binding,
-and it alters `HTTP2Server`'s execution model for every user, not just the
-streaming path. Done wrong it does not produce a failing test; it produces
-intermittent segfaults. It deserves a deliberate start rather than being
-tacked onto the end of the session that designed it.
+The buffered handler remains the default and is unchanged; `streaming = true`
+selects the incremental one. Selection is a keyword rather than handler arity,
+because a `do` block is one-argument in both forms.
+
+### What it does not yet do
+
+The request body is streamed to the handler, but nothing bounds how much a slow
+handler may let accumulate: `ServerStream`'s request buffer grows as DATA
+arrives. A handler that never reads is a memory hazard against a hostile peer.
+Bounding it means withholding WINDOW_UPDATE until the handler consumes, which is
+a flow-control change and deserves its own change rather than being tacked on
+here.
 
 ## Platform Support
 

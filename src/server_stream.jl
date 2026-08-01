@@ -26,6 +26,12 @@ Response side: [`setstatus`](@ref), [`setheader`](@ref), [`write`](@ref),
 mutable struct ServerStream <: IO
     id::Int32
 
+    # Request head. The handler is given only the stream, so what a
+    # `ServerRequest` would have carried has to live here.
+    method::String
+    path::String
+    request_headers::Vector{NVPair}
+
     # Request side, fed by the on-data-chunk callback.
     request_buffer::Vector{UInt8}
     request_closed::Bool          # peer half-closed (END_STREAM received)
@@ -39,13 +45,45 @@ mutable struct ServerStream <: IO
 
     lock::ReentrantLock
     cond::Threads.Condition
+
+    # Woken when the handler produces something the connection should flush.
+    # `nothing` for a stream that is not attached to a connection, which is how
+    # the type is exercised in isolation.
+    wake::Union{Nothing,Base.Event}
 end
 
-function ServerStream(id::Integer)
+function ServerStream(id::Integer; method::AbstractString = "",
+                      path::AbstractString = "",
+                      headers::Vector{NVPair} = NVPair[],
+                      wake::Union{Nothing,Base.Event} = nothing)
     l = ReentrantLock()
-    ServerStream(Int32(id), UInt8[], false, nothing, NVPair[], UInt8[], NVPair[],
-                 false, l, Threads.Condition(l))
+    ServerStream(Int32(id), String(method), String(path), headers,
+                 UInt8[], false, nothing, NVPair[], UInt8[], NVPair[],
+                 false, l, Threads.Condition(l), wake)
 end
+
+# --- request head ---
+
+"""
+    request_method(stream) -> String
+
+The `:method` pseudo-header of the request that opened this stream.
+"""
+request_method(s::ServerStream) = s.method
+
+"""
+    request_path(stream) -> String
+
+The `:path` pseudo-header of the request that opened this stream.
+"""
+request_path(s::ServerStream) = s.path
+
+"""
+    request_headers(stream) -> Vector{NVPair}
+
+The request headers, pseudo-headers excluded.
+"""
+request_headers(s::ServerStream) = copy(s.request_headers)
 
 # --- fed by the connection callbacks ---
 
@@ -180,8 +218,17 @@ function Base.write(s::ServerStream, bytes::Vector{UInt8})
         append!(s.response_buffer, bytes)
         notify(s.cond)
     end
+    _wake(s)
     return length(bytes)
 end
+
+# Deliberately woken by `write` and `close` only, never by `setstatus` or
+# `setheader`. The connection submits the response headers on the first wake, so
+# waking on `setstatus` would race a handler that sets its status first and its
+# headers second — and send the response without them. Waiting for the first
+# write is also exactly the contract the docstrings state: status and headers
+# must be staged before writing.
+_wake(s::ServerStream) = (s.wake === nothing || notify(s.wake); nothing)
 
 Base.unsafe_write(s::ServerStream, p::Ptr{UInt8}, n::UInt) =
     write(s, unsafe_wrap(Array, p, Int(n); own=false) |> copy)
@@ -199,6 +246,7 @@ function Base.close(s::ServerStream)
         s.handler_done = true
         notify(s.cond)
     end
+    _wake(s)
     return nothing
 end
 
@@ -210,13 +258,25 @@ response_trailers(s::ServerStream) = lock(s.lock) do; copy(s.trailers) end
 
 """
     take_response_data!(stream) -> Vector{UInt8}
+    take_response_data!(stream, n) -> Vector{UInt8}
 
-Take everything queued so far, without blocking.
+Take everything queued so far, or at most `n` bytes, without blocking. The
+bounded form is what the data provider needs: nghttp2 offers a buffer of a given
+size and anything beyond it would be dropped.
 """
 function take_response_data!(s::ServerStream)
     lock(s.lock) do
         out = s.response_buffer
         s.response_buffer = UInt8[]
+        return out
+    end
+end
+
+function take_response_data!(s::ServerStream, n::Integer)
+    lock(s.lock) do
+        take = min(Int(n), length(s.response_buffer))
+        out = s.response_buffer[1:take]
+        deleteat!(s.response_buffer, 1:take)
         return out
     end
 end

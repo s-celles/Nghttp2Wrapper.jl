@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Incremental server handlers** (ROADMAP Milestone 7). `HTTP2Server(port;
+  streaming = true)` hands the handler a `ServerStream` instead of a complete
+  `ServerRequest`, so a response is emitted as it is produced rather than
+  assembled and returned at the end.
+
+  ```julia
+  HTTP2Server(8080; streaming = true) do stream
+      setstatus(stream, 200)
+      for i in 1:5
+          write(stream, Vector{UInt8}("event $i\n"))
+          sleep(1)
+      end
+  end
+  ```
+
+  This is what the three streaming call types need — server streaming and
+  bidirectional exchanges were impossible with a buffered handler, since the
+  reply only reached the peer once the handler returned.
+
+  `ServerStream` subtypes `IO`, so `eof`, `read`, `readavailable` and
+  `readbytes!` keep their usual meaning, and the request head is reachable
+  through the new `request_method`, `request_path` and `request_headers`.
+
+  The buffered handler remains the **default** and is unchanged. Selection is a
+  keyword rather than handler arity, because a `do` block is one-argument in
+  both forms.
+
+  Status and headers must be staged before the first `write`: the response is
+  submitted on that write, so afterwards the headers are already on the wire.
+
+  `close(server)` now waits for incremental handlers in flight as it does for
+  buffered ones. They run in their own tasks, so the flag the read loop
+  maintains says nothing about them, and without this they would be cut off the
+  moment `close` was called however generous its timeout.
+- **`nghttp2_session_resume_data`** — un-defers a stream's data provider. A
+  provider with nothing to send returns `NGHTTP2_ERR_DEFERRED` rather than
+  end-of-data, and this is what tells nghttp2 to ask again; without it an
+  incremental handler's later writes are never collected.
+
 ### Fixed
 
 - **A forced `close` no longer waits for a busy handler.** `close(server;
@@ -27,6 +68,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Found from downstream: gRPCServer.jl's nghttp2 adapter maps its `force` flag
   onto `timeout = 0`, and a test asserting that a forced stop does not wait out
   a four-second handler measured 4.21s.
+
+- **The `concurrent connections` test was measuring itself, not the server.** It
+  counted handler calls in a `Ref` incremented from three handler tasks, and
+  `count[] += 1` is a load, an add and a store — concurrent increments were
+  lost. It also serialised its clients, each closing its connection 0.5s after
+  writing and before the next connected, so the server was never actually asked
+  to hold three connections at once.
+
+  Rewritten to open all three connections, send all three requests, and only
+  then close anything, with an atomic counter. Verified against unmodified
+  `main`: with three simultaneous connections and the old `Ref`, the test
+  reports `1 >= 3` every time while the server has in fact served all three.
 
 ## [0.3.0] — 2026-07-31
 

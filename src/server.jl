@@ -59,6 +59,19 @@ mutable struct ServerContext
     # what `close` waits on: `streams` cannot serve the purpose, because a
     # stream is deleted from it *before* its handler runs.
     processing::Threads.Atomic{Bool}
+
+    # --- incremental handler (streaming = true) ---
+    streaming::Bool
+    # Live ServerStreams, and which of them have had their response headers
+    # submitted. A response can only be submitted once the handler has staged a
+    # status, which is why the two are tracked separately.
+    server_streams::Dict{Int32,ServerStream}
+    submitted::Set{Int32}
+    # Raised whenever a handler writes or finishes. The read loop cannot carry
+    # this: it is blocked waiting for the peer, and in server streaming the peer
+    # has already said everything it intends to.
+    wake::Base.Event
+    closing::Threads.Atomic{Bool}
 end
 
 """
@@ -99,11 +112,13 @@ mutable struct HTTP2Server
     # nest, in either order.
     contexts::Vector{ServerContext}
     contexts_lock::ReentrantLock
+    streaming::Bool
 
     function HTTP2Server(handler::Function, port::Integer;
                          host::AbstractString="0.0.0.0",
                          certfile::AbstractString="",
-                         keyfile::AbstractString="")
+                         keyfile::AbstractString="",
+                         streaming::Bool=false)
         tls_config = nothing
         listener = if !isempty(certfile) && !isempty(keyfile)
             tls_config = TLS.Config(
@@ -117,7 +132,7 @@ mutable struct HTTP2Server
         end
 
         server = new(listener, handler, tls_config, Task[], true, Task(() -> nothing),
-                     ServerContext[], ReentrantLock())
+                     ServerContext[], ReentrantLock(), streaming)
         server.accept_task = Threads.@spawn _server_accept_loop(server)
         return server
     end
@@ -173,7 +188,7 @@ function Base.close(server::HTTP2Server; timeout::Real = DEFAULT_SHUTDOWN_TIMEOU
 
     # Graceful: let anything mid-request finish. An idle connection is not
     # processing, so this returns at once in the common case.
-    settled = _await(() -> all(ctx -> !ctx.processing[], contexts), timeout)
+    settled = _await(() -> all(_connection_idle, contexts), timeout)
     settled || @debug "HTTP2Server: shutdown timeout elapsed with requests still in flight"
 
     # Those connections are idle now, so the courtesy they missed can be paid.
@@ -186,6 +201,22 @@ function Base.close(server::HTTP2Server; timeout::Real = DEFAULT_SHUTDOWN_TIMEOU
     _await(() -> all(istaskdone, tasks), FORCED_SHUTDOWN_GRACE)
 
     return nothing
+end
+
+"""
+Whether a connection has nothing in flight.
+
+Two things count. `processing` covers the buffered path, where the handler runs
+inside the read loop. `server_streams` covers the incremental one, where the
+handler runs in its own task and so is invisible to that flag — without this an
+incremental handler would be cut off the moment `close` was called, however
+generous its timeout.
+"""
+function _connection_idle(ctx::ServerContext)
+    ctx.processing[] && return false
+    return lock(ctx.lock) do
+        isempty(ctx.server_streams)
+    end
 end
 
 """
@@ -330,6 +361,11 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
         ReentrantLock(),
         Dict{Int32,ResponseBodySource}(),
         Threads.Atomic{Bool}(false),
+        server.streaming,
+        Dict{Int32,ServerStream}(),
+        Set{Int32}(),
+        Base.Event(true),
+        Threads.Atomic{Bool}(false),
     )
     lock(server.contexts_lock) do
         push!(server.contexts, ctx)
@@ -359,6 +395,10 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
     if !isempty(outdata)
         try; write(io, outdata); catch; end
     end
+
+    # The writer task exists only for the incremental path; the buffered one
+    # produces everything inside `mem_recv2` and is flushed by the read loop.
+    writer = ctx.streaming ? Threads.@spawn(_server_writer_loop(server, ctx)) : nothing
 
     # I/O loop — read data from client and feed to nghttp2.
     # Reseau's TLS.Conn doesn't support single-byte read, so we use unsafe_read
@@ -418,6 +458,18 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
         # *before* freeing the session: a concurrent `close` must either get the
         # lock first and use a live session, or find C_NULL and skip. Anything
         # else is a use-after-free.
+        # Stop the writer before freeing the session it calls into, and wake it
+        # so it observes the flag instead of waiting for an event that will
+        # never come.
+        ctx.closing[] = true
+        notify(ctx.wake)
+        if writer !== nothing
+            t0 = time()
+            while !istaskdone(writer) && time() - t0 < 5
+                sleep(0.01)
+            end
+        end
+
         lock(ctx.lock) do
             ctx.session_ptr = C_NULL
             nghttp2_session_del(session_ptr)
@@ -430,6 +482,103 @@ function _server_connection_handler(server::HTTP2Server, io::IO)
     # HTTP2Server.contexts_lock about the two locks never nesting.
     lock(server.contexts_lock) do
         filter!(!==(ctx), server.contexts)
+    end
+end
+
+# --- incremental handler plumbing ---
+
+"""
+Flush whatever the incremental handlers have produced.
+
+Runs on the writer task, never on the reader, so every call into the session is
+taken under `ctx.lock` — an nghttp2 session is not thread-safe and the reader is
+using the same one.
+"""
+function _flush_streams!(ctx::ServerContext)
+    lock(ctx.lock) do
+        ctx.session_ptr == C_NULL && return
+        for (id, stream) in ctx.server_streams
+            if id in ctx.submitted
+                # The provider returned NGHTTP2_ERR_DEFERRED when it had nothing
+                # to send; without this nghttp2 never asks again and the
+                # handler's later writes are never collected.
+                nghttp2_session_resume_data(ctx.session_ptr, id)
+            else
+                _submit_stream_response!(ctx, id, stream)
+            end
+        end
+        out = _session_send_all(ctx.session_ptr)
+        isempty(out) || write(ctx.io_stream, out)
+    end
+    return nothing
+end
+
+"""
+Submit the response headers for a stream, once the handler has produced
+something.
+
+Called on the first wake, which `ServerStream` raises on `write` and `close` but
+deliberately not on `setstatus` — so by the time we get here the status and
+headers are staged. A handler that finishes without setting a status gets 200.
+"""
+function _submit_stream_response!(ctx::ServerContext, id::Int32, stream::ServerStream)
+    status = response_status(stream)
+    status === nothing && isopen(stream) && return   # nothing staged yet
+    resp_headers = NVPair[NVPair(":status", string(something(status, 200)))]
+    append!(resp_headers, response_headers(stream))
+    nva = [to_nghttp2_nv(nv) for nv in resp_headers]
+    data_prd = Ref(Nghttp2DataProvider(pointer_from_objref(stream),
+                                       _server_stream_data_read_cb_ptr()))
+    GC.@preserve resp_headers nva stream data_prd begin
+        nghttp2_submit_response2(ctx.session_ptr, id, pointer(nva), length(nva),
+                                 Base.unsafe_convert(Ptr{Cvoid}, data_prd))
+    end
+    push!(ctx.submitted, id)
+    return nothing
+end
+
+"""
+Per-connection writer task.
+
+The reader loop only ever emits in reaction to inbound bytes. In server
+streaming the peer has already sent everything it will send, so a handler
+producing messages would have nothing to flush them to the socket and the stream
+would stall until the next inbound byte — which never comes. This task is what
+turns "the handler wrote something" into an event the connection can act on.
+"""
+function _server_writer_loop(server::HTTP2Server, ctx::ServerContext)
+    while !ctx.closing[] && server.isopen
+        wait(ctx.wake)
+        ctx.closing[] && break
+        try
+            _flush_streams!(ctx)
+        catch
+            break
+        end
+    end
+    return nothing
+end
+
+"""
+Start the handler for a freshly opened stream.
+
+Started on HEADERS rather than on END_STREAM: an incremental handler has to be
+able to read the request body as it arrives and to answer before the request is
+complete, which is the whole difference from the buffered path.
+"""
+function _spawn_stream_handler!(ctx::ServerContext, stream::ServerStream)
+    return Threads.@spawn begin
+        try
+            ctx.handler(stream)
+        catch
+            # A handler that threw still owes the peer a response, and the
+            # stream still has to be terminated or the connection hangs.
+            lock(stream.lock) do
+                stream.status === nothing && (stream.status = 500)
+            end
+        finally
+            close(stream)
+        end
     end
 end
 
@@ -528,9 +677,17 @@ function _server_on_data_chunk_cb(session_ptr::Ptr{Cvoid}, flags::UInt8,
     try
         ctx = _server_get_ctx(user_data)
         chunk = copy(unsafe_wrap(Array, data_ptr, len; own=false))
-        lock(ctx.lock) do
-            if haskey(ctx.streams, stream_id)
-                append!(ctx.streams[stream_id].body, chunk)
+        if ctx.streaming
+            # Straight to the handler, which may already be blocked reading it.
+            stream = lock(ctx.lock) do
+                get(ctx.server_streams, stream_id, nothing)
+            end
+            stream === nothing || push_request_data!(stream, chunk)
+        else
+            lock(ctx.lock) do
+                if haskey(ctx.streams, stream_id)
+                    append!(ctx.streams[stream_id].body, chunk)
+                end
             end
         end
     catch
@@ -555,6 +712,36 @@ function _server_on_frame_recv_cb(session_ptr::Ptr{Cvoid}, frame_ptr::Ptr{Cvoid}
         has_end_stream = (frame_flags & NGHTTP2_FLAG_END_STREAM) != 0
         is_headers = frame_type == NGHTTP2_HEADERS
         is_data = frame_type == NGHTTP2_DATA
+
+        if ctx.streaming && stream_id > 0 && (is_headers || is_data)
+            if is_headers
+                # Start the handler here, not on END_STREAM: an incremental
+                # handler has to be able to read the body as it arrives and to
+                # answer before the request is complete.
+                st = lock(ctx.lock) do
+                    ss = get(ctx.streams, stream_id, nothing)
+                    ss === nothing || delete!(ctx.streams, stream_id)
+                    ss
+                end
+                if st !== nothing && !haskey(ctx.server_streams, stream_id)
+                    stream = ServerStream(stream_id; method = st.method,
+                                          path = st.path, headers = st.headers,
+                                          wake = ctx.wake)
+                    isempty(st.body) || push_request_data!(stream, st.body)
+                    lock(ctx.lock) do
+                        ctx.server_streams[stream_id] = stream
+                    end
+                    has_end_stream && close_request!(stream)
+                    _spawn_stream_handler!(ctx, stream)
+                end
+            elseif has_end_stream
+                stream = lock(ctx.lock) do
+                    get(ctx.server_streams, stream_id, nothing)
+                end
+                stream === nothing || close_request!(stream)
+            end
+            return Cint(0)
+        end
 
         if has_end_stream && (is_headers || is_data) && stream_id > 0
             st = lock(ctx.lock) do
@@ -722,4 +909,69 @@ function _server_data_source_read_cb(session_ptr::Ptr{Cvoid}, stream_id::Int32,
 end
 
 _server_data_source_read_cb_ptr() = @cfunction(_server_data_source_read_cb, Cssize_t,
+    (Ptr{Cvoid}, Int32, Ptr{UInt8}, Csize_t, Ptr{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}))
+
+"""
+Data provider for an incremental handler.
+
+Same C signature as the buffered one, but its source is a `ServerStream` being
+filled by a handler that is still running, so it has a third answer available:
+
+- bytes queued  → copy them out
+- nothing queued, handler still running → `NGHTTP2_ERR_DEFERRED`, meaning "ask
+  me again after `nghttp2_session_resume_data`" rather than "there is no more"
+- nothing queued, handler finished → `NGHTTP2_DATA_FLAG_EOF`, plus
+  `NGHTTP2_DATA_FLAG_NO_END_STREAM` and a trailer submit when trailers were
+  staged, since then it is the trailers that close the stream
+
+Without the deferred answer nghttp2 would treat the first empty read as
+end-of-response and close the stream under a handler that had more to say.
+"""
+function _server_stream_data_read_cb(session_ptr::Ptr{Cvoid}, stream_id::Int32,
+                                      buf::Ptr{UInt8}, len::Csize_t,
+                                      data_flags::Ptr{UInt32},
+                                      source::Ptr{Cvoid},
+                                      user_data::Ptr{Cvoid})::Cssize_t
+    try
+        src_ptr = unsafe_load(Ptr{Ptr{Cvoid}}(source))
+        stream = unsafe_pointer_to_objref(src_ptr)::ServerStream
+
+        chunk = take_response_data!(stream, Int(len))
+        if !isempty(chunk)
+            GC.@preserve chunk unsafe_copyto!(buf, pointer(chunk), length(chunk))
+        end
+
+        if response_complete(stream)
+            trailers = response_trailers(stream)
+            flags = unsafe_load(data_flags) | NGHTTP2_DATA_FLAG_EOF
+            isempty(trailers) || (flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM)
+            unsafe_store!(data_flags, flags)
+            isempty(trailers) || nghttp2_submit_trailer(session_ptr, stream_id, trailers)
+
+            # Drop the stream now that nothing more will be asked of it. The
+            # context is reachable from user_data, set at session creation.
+            # Under ctx.lock like every other mutation of these two. This
+            # callback is only ever reached from inside `_session_send_all`,
+            # which its callers hold the lock across — but the lock is
+            # reentrant, so asserting it here costs nothing and stops that
+            # being a fact one has to rediscover.
+            try
+                ctx = _server_get_ctx(user_data)
+                lock(ctx.lock) do
+                    delete!(ctx.server_streams, stream_id)
+                    delete!(ctx.submitted, stream_id)
+                end
+            catch
+            end
+        elseif isempty(chunk)
+            return Cssize_t(NGHTTP2_ERR_DEFERRED)
+        end
+
+        return Cssize_t(length(chunk))
+    catch
+        return Cssize_t(NGHTTP2_ERR_CALLBACK_FAILURE)
+    end
+end
+
+_server_stream_data_read_cb_ptr() = @cfunction(_server_stream_data_read_cb, Cssize_t,
     (Ptr{Cvoid}, Int32, Ptr{UInt8}, Csize_t, Ptr{UInt32}, Ptr{Cvoid}, Ptr{Cvoid}))

@@ -9,6 +9,23 @@ function nghttp2_session_find_stream(session::Ptr{Cvoid}, stream_id::Integer)
 end
 
 """
+    nghttp2_session_resume_data(session, stream_id) → Cint
+
+Un-defer a stream's data provider.
+
+A data provider that has nothing to send returns `NGHTTP2_ERR_DEFERRED` rather
+than end-of-data, and nghttp2 then stops asking. This is what tells it to ask
+again — without it an incremental handler's later writes are never collected.
+
+Returns 0, or `NGHTTP2_ERR_INVALID_ARGUMENT` if the stream does not exist or was
+not deferred.
+"""
+function nghttp2_session_resume_data(session::Ptr{Cvoid}, stream_id::Integer)
+    ccall((:nghttp2_session_resume_data, libnghttp2), Cint,
+          (Ptr{Cvoid}, Int32), session, stream_id)
+end
+
+"""
     nghttp2_session_get_stream_user_data(session, stream_id) → Ptr{Cvoid}
 
 Get the user data associated with a stream.
