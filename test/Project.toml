@@ -6,4 +6,5 @@ TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
 nghttp2_jll = "8e850ede-7688-5339-a07c-302acd2aaf8d"
 
 [compat]
+TestItemRunner = "1"
 Aqua = "0.8"
