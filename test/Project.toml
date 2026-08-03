@@ -7,3 +7,4 @@ nghttp2_jll = "8e850ede-7688-5339-a07c-302acd2aaf8d"
 
 [compat]
 TestItemRunner = "1"
+Aqua = "0.8"
