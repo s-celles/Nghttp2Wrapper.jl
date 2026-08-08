@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mutual TLS on the server** (ROADMAP Milestone 8.3). `HTTP2Server` accepted a
+  certificate and a key and nothing else, so `client_ca`, `require_client_cert`
+  and `min_tls_version` had nowhere to be expressed — and in gRPCServer.jl they
+  were silently discarded, which meant one could configure mTLS and get a server
+  that never verified a client certificate.
+
+  These options are **refused, not ignored**, on a plaintext listener, and
+  `require_client_cert` without a `client_ca` is refused too: there would be
+  nothing to verify against.
+
+  Fixtures are generated on demand by `test/fixtures/generate_mtls_certs.jl`,
+  called from `runtests.jl`, and are not committed — private keys do not belong
+  in a repository. The generator *raises* when `openssl` is absent rather than
+  returning quietly, because a silent return is how a whole test surface
+  disappears while CI stays green.
+
+
 
 - **Server SETTINGS are configurable** (ROADMAP Milestone 8.1). `HTTP2Server`
   submitted an empty SETTINGS frame on every connection, so every server ran on
@@ -79,6 +96,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incremental handler's later writes are never collected.
 
 ### Fixed
+
+- **The `Reseau = "1"` bound is now actually tested.** A new `downgrade` CI job
+  resolves the oldest versions every `[compat]` bound allows and runs the suite
+  against them.
+
+  Without it the bounds were a claim nobody checked: CI only ever saw Reseau
+  1.3.4, while the bound admits 1.0.1. A local checkout sitting on 1.0.1 failed
+  on `TLS.connect(network, address, config)` — an API the package does not use
+  but a new test did. The bound was truthful and the suite was not portable to
+  it, which is just as invisible as an untruthful bound. The test now uses the
+  keyword form, which spans the whole 1.x range; verified green on both 1.0.1
+  and 1.3.4.
+
 
 
 - **A forced `close` no longer waits for a busy handler.** `close(server;

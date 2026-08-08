@@ -246,6 +246,35 @@ close(client)
     whose `TLS.listen` / `TLS.accept` drive the handshake to completion
     internally. ALPN `h2` is advertised via `TLS.Config(alpn_protocols = ["h2"])`.
 
+## Mutual TLS
+
+Beyond a certificate and key, the server accepts a client CA, a requirement that
+clients present a certificate, and a minimum protocol version:
+
+```julia
+server = HTTP2Server(8443;
+                     certfile = "server.crt",
+                     keyfile = "server.key",
+                     client_ca = "ca.crt",
+                     require_client_cert = true,
+                     min_tls_version = :TLSv1_3) do req
+    ServerResponse(200, "hello, verified client")
+end
+```
+
+`require_client_cert = true` is mutual TLS proper: a client must present a
+certificate and it must chain to `client_ca`. Giving a `client_ca` without the
+requirement verifies whatever is offered and still allows none.
+
+!!! note "These options are refused, not ignored, without TLS"
+    Passing `client_ca`, `require_client_cert` or `min_tls_version` to a
+    plaintext (h2c) listener raises `ArgumentError`, and so does
+    `require_client_cert` without a `client_ca` — there would be nothing to
+    verify against.
+
+    A server that accepts a mutual-TLS configuration and then verifies nothing
+    looks configured and is not, and nobody finds out until someone tests it.
+
 ## Testing from a Browser
 
 Browsers (Chrome, Firefox, Safari, Edge) only negotiate HTTP/2 over TLS with

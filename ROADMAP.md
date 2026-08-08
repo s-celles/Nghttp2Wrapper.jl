@@ -271,7 +271,7 @@ here.
 
 ## Milestone 8 — Server configuration parity
 
-**Status**: 8.1 and 8.2 implemented; 8.3 outstanding.
+**Status**: Implemented.
 
 Three pieces of server configuration are declared by callers and then quietly
 dropped. All three were found while evaluating this package as a gRPC backend
@@ -330,27 +330,7 @@ Adding a field to `ServerRequest` is the obvious shape, and it is technically
 breaking for anyone constructing one positionally. Keeping the existing
 five-argument outer constructor working makes it additive in practice.
 
-### 8.3 — TLS is only half-configurable — **outstanding**
-
-Needs test fixtures before it needs code: `test/fixtures/` has only a server
-certificate and key, so there is no CA and no client certificate to verify
-against, and mutual TLS cannot be tested at all. Generating those is the first
-step, not an afterthought — an mTLS path that is implemented but unverified is
-the same silent-failure shape this milestone exists to remove.
-
-
-`HTTP2Server` accepts `certfile` and `keyfile`, and nothing else:
-
-```julia
-tls_config = TLS.Config(cert_file = certfile, key_file = keyfile,
-                        alpn_protocols = ["h2"])
-```
-
-A caller asking for mutual TLS, a client CA, or a minimum protocol version has
-nowhere to say so. In gRPCServer.jl the consequence is concrete and dangerous:
-`TLSConfig` has `client_ca`, `require_client_cert` and `min_version`, and all
-three are silently discarded — you can configure mTLS and get a server that
-never verifies a client certificate, with no warning.
+### 8.3 — TLS is only half-configurable — **done**
 
 Reseau's `TLS.Config` already carries the fields:
 

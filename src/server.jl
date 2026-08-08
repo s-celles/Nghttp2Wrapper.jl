@@ -126,7 +126,37 @@ mutable struct HTTP2Server
                          max_concurrent_streams::Union{Nothing,Integer}=nothing,
                          initial_window_size::Union{Nothing,Integer}=nothing,
                          max_frame_size::Union{Nothing,Integer}=nothing,
-                         max_header_list_size::Union{Nothing,Integer}=nothing)
+                         max_header_list_size::Union{Nothing,Integer}=nothing,
+                         client_ca::AbstractString="",
+                         require_client_cert::Bool=false,
+                         min_tls_version::Union{Nothing,Symbol}=nothing)
+        # Refuse rather than ignore. Accepting a client CA on a plaintext
+        # listener and then verifying nothing is a server that looks configured
+        # and is not — the failure is invisible until someone tests it.
+        tls_requested = !isempty(certfile) && !isempty(keyfile)
+        if !tls_requested && (!isempty(client_ca) || require_client_cert ||
+                              min_tls_version !== nothing)
+            throw(ArgumentError(
+                "client_ca, require_client_cert and min_tls_version are TLS " *
+                "options and need certfile and keyfile; this listener is " *
+                "plaintext (h2c)"))
+        end
+        if require_client_cert && isempty(client_ca)
+            throw(ArgumentError(
+                "require_client_cert needs client_ca: there is nothing to " *
+                "verify a client certificate against"))
+        end
+        min_version = if min_tls_version === nothing
+            nothing
+        elseif min_tls_version === :TLSv1_2
+            TLS.TLS1_2_VERSION
+        elseif min_tls_version === :TLSv1_3
+            TLS.TLS1_3_VERSION
+        else
+            throw(ArgumentError(
+                "min_tls_version must be :TLSv1_2 or :TLSv1_3, got " *
+                "$(repr(min_tls_version))"))
+        end
         # Named keywords rather than a raw Vector{Nghttp2SettingsEntry}: these
         # four are what a server realistically sets, and `max_concurrent_streams
         # = 100` says what it means where the entry form is ceremony. Anything
@@ -146,10 +176,24 @@ mutable struct HTTP2Server
             push!(settings, Nghttp2SettingsEntry(id, UInt32(value)))
         end
         tls_config = nothing
-        listener = if !isempty(certfile) && !isempty(keyfile)
+        listener = if tls_requested
+            # RequireAndVerifyClientCert is mutual TLS proper: a client must
+            # present a certificate and it must chain to `client_ca`. With a CA
+            # but no requirement, verify what is offered and allow none —
+            # anything else would silently accept an unverifiable certificate.
+            client_auth = if require_client_cert
+                TLS.ClientAuthMode.RequireAndVerifyClientCert
+            elseif !isempty(client_ca)
+                TLS.ClientAuthMode.VerifyClientCertIfGiven
+            else
+                TLS.ClientAuthMode.NoClientCert
+            end
             tls_config = TLS.Config(
                 cert_file = certfile,
                 key_file = keyfile,
+                client_ca_file = isempty(client_ca) ? nothing : String(client_ca),
+                client_auth = client_auth,
+                min_version = min_version,
                 alpn_protocols = ["h2"],
             )
             TLS.listen("tcp", "$(host):$(port)", tls_config)
