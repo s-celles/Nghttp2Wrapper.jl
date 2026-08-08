@@ -22,6 +22,14 @@ const FIXTURES = joinpath(@__DIR__, "..", "test", "fixtures")
 const CERT = joinpath(FIXTURES, "server.crt")
 const KEY  = joinpath(FIXTURES, "server.key")
 
+# The fixtures are generated, never committed — a repository is no place for a
+# private key. Running this example creates them if they are absent, so it works
+# from a fresh checkout without a separate step.
+if !isfile(CERT) || !isfile(KEY)
+    include(joinpath(FIXTURES, "generate_mtls_certs.jl"))
+    generate_mtls_certificates()
+end
+
 server = HTTP2Server(8443; certfile=CERT, keyfile=KEY) do req
     ServerResponse(200, "Hello HTTP/2!")
 end
