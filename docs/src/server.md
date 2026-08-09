@@ -96,6 +96,40 @@ body does not close the stream — the trailers do. A trailers-only response
     for emitting messages incrementally. An incremental handler model is on the
     roadmap.
 
+## Server Settings
+
+A server sends its HTTP/2 SETTINGS on every new connection. By default it sends
+an empty frame — the required handshake and nothing more. Name what you want and
+only that is sent:
+
+```julia
+server = HTTP2Server(8080; max_concurrent_streams = 100,
+                           initial_window_size = 1 << 20) do req
+    ServerResponse(200, "OK")
+end
+```
+
+Available: `max_concurrent_streams`, `initial_window_size`, `max_frame_size` and
+`max_header_list_size`. A setting left unset is not sent, so protocol defaults
+apply. For anything outside these four, `nghttp2_submit_settings` is exported.
+
+## Knowing Who Is Calling
+
+`peer_address` returns the remote endpoint of the connection a request arrived
+on, as a `Sockets.InetAddr`:
+
+```julia
+server = HTTP2Server(8080) do req
+    @info "request" from = peer_address(req) path = req.path
+    ServerResponse(200, "OK")
+end
+```
+
+It works for both listener kinds and for incremental handlers
+(`peer_address(stream)`). It returns `nothing` when the endpoint cannot be
+resolved — a peer that has already gone, say — rather than a fabricated
+address, so a caller rate-limiting or logging on it can tell the difference.
+
 ## Incremental Handlers
 
 The handler shown above is *buffered*: it receives a complete `ServerRequest` and
@@ -211,6 +245,35 @@ close(client)
     Server-side TLS is provided by [Reseau.jl](https://github.com/JuliaServices/Reseau.jl),
     whose `TLS.listen` / `TLS.accept` drive the handshake to completion
     internally. ALPN `h2` is advertised via `TLS.Config(alpn_protocols = ["h2"])`.
+
+## Mutual TLS
+
+Beyond a certificate and key, the server accepts a client CA, a requirement that
+clients present a certificate, and a minimum protocol version:
+
+```julia
+server = HTTP2Server(8443;
+                     certfile = "server.crt",
+                     keyfile = "server.key",
+                     client_ca = "ca.crt",
+                     require_client_cert = true,
+                     min_tls_version = :TLSv1_3) do req
+    ServerResponse(200, "hello, verified client")
+end
+```
+
+`require_client_cert = true` is mutual TLS proper: a client must present a
+certificate and it must chain to `client_ca`. Giving a `client_ca` without the
+requirement verifies whatever is offered and still allows none.
+
+!!! note "These options are refused, not ignored, without TLS"
+    Passing `client_ca`, `require_client_cert` or `min_tls_version` to a
+    plaintext (h2c) listener raises `ArgumentError`, and so does
+    `require_client_cert` without a `client_ca` — there would be nothing to
+    verify against.
+
+    A server that accepts a mutual-TLS configuration and then verifies nothing
+    looks configured and is not, and nobody finds out until someone tests it.
 
 ## Testing from a Browser
 

@@ -9,7 +9,27 @@ struct ServerRequest
     headers::Vector{NVPair}
     body::Vector{UInt8}
     stream_id::Int32
+    # `nothing` when the endpoint could not be resolved — a peer that has
+    # already gone, say. Better than a fabricated zero a caller might log or
+    # rate-limit on.
+    peer::Union{Nothing,Sockets.InetAddr}
 end
+
+# The five-argument form predates the peer address and is kept so existing
+# callers and tests are unaffected.
+ServerRequest(method::AbstractString, path::AbstractString,
+              headers::Vector{NVPair}, body::Vector{UInt8}, stream_id::Integer) =
+    ServerRequest(String(method), String(path), headers, body, Int32(stream_id), nothing)
+
+"""
+    peer_address(request) -> Union{Nothing,Sockets.InetAddr}
+
+The remote endpoint the request arrived from.
+
+Without it a handler cannot tell who is calling, which rules out per-client rate
+limiting, audit logging and address-based access control.
+"""
+peer_address(r::ServerRequest) = r.peer
 
 function Base.show(io::IO, r::ServerRequest)
     print(io, "ServerRequest(\"$(r.method)\", \"$(r.path)\", stream=$(r.stream_id))")

@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mutual TLS on the server** (ROADMAP Milestone 8.3). `HTTP2Server` accepted a
+  certificate and a key and nothing else, so `client_ca`, `require_client_cert`
+  and `min_tls_version` had nowhere to be expressed — and in gRPCServer.jl they
+  were silently discarded, which meant one could configure mTLS and get a server
+  that never verified a client certificate.
+
+  These options are **refused, not ignored**, on a plaintext listener, and
+  `require_client_cert` without a `client_ca` is refused too: there would be
+  nothing to verify against.
+
+  Fixtures are generated on demand by `test/fixtures/generate_mtls_certs.jl`,
+  called from `runtests.jl`, and are not committed — private keys do not belong
+  in a repository. The generator *raises* when `openssl` is absent rather than
+  returning quietly, because a silent return is how a whole test surface
+  disappears while CI stays green.
+
+
+
+- **Server SETTINGS are configurable** (ROADMAP Milestone 8.1). `HTTP2Server`
+  submitted an empty SETTINGS frame on every connection, so every server ran on
+  protocol defaults and could not bound concurrent streams or adjust its window,
+  frame or header-list limits — a caller's configuration was simply dropped.
+
+  ```julia
+  HTTP2Server(8080; max_concurrent_streams = 100, initial_window_size = 1 << 20)
+  ```
+
+  Named keywords rather than a `Vector{Nghttp2SettingsEntry}`: these four are
+  what a server realistically sets, and the entry form is ceremony for them.
+  Anything else remains reachable through the exported
+  `nghttp2_submit_settings`. A setting left unset is **not sent**, so the
+  default is unchanged and no existing server's protocol behaviour moves.
+- **`peer_address`** (ROADMAP Milestone 8.2), on both `ServerRequest` and
+  `ServerStream`. A handler could not tell who was calling, which ruled out
+  per-client rate limiting, audit logging and address-based access control, and
+  forced gRPCServer.jl's adapter to present a fabricated zero as fact.
+
+  Returns a `Sockets.InetAddr`, or `nothing` when the endpoint cannot be
+  resolved, so a caller can tell "unknown" from an address. Works for both
+  listener kinds — Reseau caches it on TLS connections, plain sockets answer
+  `getpeername`.
+
+  `ServerRequest` gains a field; its five-argument constructor is kept, so
+  existing callers are unaffected.
+
+
+
 - **Incremental server handlers** (ROADMAP Milestone 7). `HTTP2Server(port;
   streaming = true)` hands the handler a `ServerStream` instead of a complete
   `ServerRequest`, so a response is emitted as it is produced rather than
@@ -49,6 +96,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incremental handler's later writes are never collected.
 
 ### Fixed
+
+- **The `Reseau = "1"` bound is now actually tested.** A new `downgrade` CI job
+  resolves the oldest versions every `[compat]` bound allows and runs the suite
+  against them.
+
+  Without it the bounds were a claim nobody checked: CI only ever saw Reseau
+  1.3.4, while the bound admits 1.0.1. A local checkout sitting on 1.0.1 failed
+  on `TLS.connect(network, address, config)` — an API the package does not use
+  but a new test did. The bound was truthful and the suite was not portable to
+  it, which is just as invisible as an untruthful bound. The test now uses the
+  keyword form, which spans the whole 1.x range; verified green on both 1.0.1
+  and 1.3.4.
+
+
 
 - **A forced `close` no longer waits for a busy handler.** `close(server;
   timeout = 0)` took exactly as long as the slowest running handler — the

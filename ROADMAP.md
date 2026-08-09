@@ -271,7 +271,7 @@ here.
 
 ## Milestone 8 — Server configuration parity
 
-**Status**: Identified, not implemented.
+**Status**: Implemented.
 
 Three pieces of server configuration are declared by callers and then quietly
 dropped. All three were found while evaluating this package as a gRPC backend
@@ -282,7 +282,7 @@ The common failure mode is what makes these worth fixing: a caller configures
 something, gets no error, and does not get the behaviour. Silence is worse than
 refusal.
 
-### 8.1 — SETTINGS are never sent
+### 8.1 — SETTINGS are never sent — **done**
 
 `_server_connection_handler` submits an empty SETTINGS frame:
 
@@ -306,7 +306,7 @@ one-to-one onto nghttp2 but is ceremony for the common case. A hybrid — named
 keywords for the four a server realistically sets, with `nghttp2_submit_settings`
 left exported for the rest — is probably right.
 
-### 8.2 — `ServerRequest` carries no peer address
+### 8.2 — `ServerRequest` carries no peer address — **done**
 
 ```julia
 struct ServerRequest
@@ -330,20 +330,7 @@ Adding a field to `ServerRequest` is the obvious shape, and it is technically
 breaking for anyone constructing one positionally. Keeping the existing
 five-argument outer constructor working makes it additive in practice.
 
-### 8.3 — TLS is only half-configurable
-
-`HTTP2Server` accepts `certfile` and `keyfile`, and nothing else:
-
-```julia
-tls_config = TLS.Config(cert_file = certfile, key_file = keyfile,
-                        alpn_protocols = ["h2"])
-```
-
-A caller asking for mutual TLS, a client CA, or a minimum protocol version has
-nowhere to say so. In gRPCServer.jl the consequence is concrete and dangerous:
-`TLSConfig` has `client_ca`, `require_client_cert` and `min_version`, and all
-three are silently discarded — you can configure mTLS and get a server that
-never verifies a client certificate, with no warning.
+### 8.3 — TLS is only half-configurable — **done**
 
 Reseau's `TLS.Config` already carries the fields:
 

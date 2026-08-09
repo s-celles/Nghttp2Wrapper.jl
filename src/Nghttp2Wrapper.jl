@@ -1,7 +1,7 @@
 module Nghttp2Wrapper
 
 using nghttp2_jll
-using Reseau: TLS
+using Reseau: TLS, TCP
 using URIs
 using Sockets
 
@@ -142,7 +142,7 @@ export post, put, patch, head, options
 
 # Milestone 4: HTTP/2 Server
 export HTTP2Server, ServerStream, setstatus, setheader, settrailer, ServerRequest, ServerResponse
-export request_method, request_path, request_headers
+export request_method, request_path, request_headers, peer_address
 
 # Milestone 6: Advanced Features
 export PrioritySpec
