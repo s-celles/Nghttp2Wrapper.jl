@@ -11,13 +11,14 @@
 # `runtests.jl` calls this before running anything, and the tests assert the
 # files exist rather than skipping when they do not.
 #
-# Produces a throwaway CA and a client certificate signed by it. `server.crt`
-# and `server.key` are a separate, pre-existing fixture: for mutual TLS the
-# server verifies the *client* against `ca.crt`, while its own certificate stays
-# the self-signed one the test client accepts by not verifying it.
+# Produces the server's own self-signed certificate, a throwaway CA, and a
+# client certificate signed by that CA. For mutual TLS the server verifies the
+# *client* against `ca.crt`, while its own certificate is the self-signed one
+# the test client accepts by not verifying it.
 
 const FIXTURES = @__DIR__
-const MTLS_FILES = ("ca.crt", "ca.key", "client.crt", "client.key")
+const MTLS_FILES = ("server.crt", "server.key",
+                    "ca.crt", "ca.key", "client.crt", "client.key")
 
 """
     mtls_fixtures_present() -> Bool
@@ -29,7 +30,7 @@ mtls_fixtures_present() = all(isfile(joinpath(FIXTURES, f)) for f in MTLS_FILES)
 """
     generate_mtls_certificates(; force = false)
 
-Create the mutual-TLS fixtures if they are missing. Raises if `openssl` is not
+Create the TLS fixtures if they are missing. Raises if `openssl` is not
 available, rather than returning quietly — a silent return here is how a whole
 test surface disappears without anyone noticing.
 """
@@ -43,12 +44,23 @@ function generate_mtls_certificates(; force::Bool = false)
         "machine that has it — do not skip them silently.")
 
     days = "3650"
+    sv_crt = joinpath(FIXTURES, "server.crt")
+    sv_key = joinpath(FIXTURES, "server.key")
     ca_crt = joinpath(FIXTURES, "ca.crt")
     ca_key = joinpath(FIXTURES, "ca.key")
     cl_crt = joinpath(FIXTURES, "client.crt")
     cl_key = joinpath(FIXTURES, "client.key")
     cl_csr = joinpath(FIXTURES, "client.csr")
     ca_srl = joinpath(FIXTURES, "ca.srl")
+
+    # The server certificate. A subjectAltName is set because the committed
+    # fixture it replaces had none, and a certificate identified only by CN is
+    # rejected outright by anything modern.
+    run(pipeline(`$openssl req -x509 -newkey rsa:2048 -nodes -days $days
+                  -keyout $sv_key -out $sv_crt
+                  -subj "/CN=localhost"
+                  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"`,
+                 stdout = devnull, stderr = devnull))
 
     run(pipeline(`$openssl req -x509 -newkey rsa:2048 -nodes -days $days
                   -keyout $ca_key -out $ca_crt

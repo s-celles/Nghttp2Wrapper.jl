@@ -97,6 +97,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **No certificates or private keys in the repository.** `test/fixtures/`
+  carried a committed `server.crt` and `server.key`, and `.gitignore` allowed
+  any `*.crt` or `*.key` beside them — while its own comment said "script but
+  not generated certs".
+
+  All of it is generated now, by `test/fixtures/generate_mtls_certs.jl`, which
+  `runtests.jl` calls before anything runs and `examples/browser_hello.jl` calls
+  for itself. The ignore rule is absolute: "these keys are fine, those are not"
+  is a distinction that erodes, and one `git add -A` is all it takes.
+
+  The regenerated server certificate also carries a `subjectAltName`, which the
+  committed one lacked — a certificate identified only by its CN is rejected
+  outright by anything modern.
+
+  Removing the files does not erase them from history. They are throwaway
+  development keys for `localhost` with no value, so they are left there rather
+  than rewriting history over them.
+
 - **The `Reseau = "1"` bound is now actually tested.** A new `downgrade` CI job
   resolves the oldest versions every `[compat]` bound allows and runs the suite
   against them.
